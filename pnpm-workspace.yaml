@@ -10,3 +10,4 @@ allowBuilds:
   ssh2: false
   '@scarf/scarf': false
   '@swc/core': true
+  msgpackr-extract: false

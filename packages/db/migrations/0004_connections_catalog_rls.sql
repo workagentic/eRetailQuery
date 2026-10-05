@@ -1,0 +1,11 @@
+SELECT app_secure_tenant_table('store_connections');
+--> statement-breakpoint
+SELECT app_secure_tenant_table('ad_connections');
+--> statement-breakpoint
+SELECT app_secure_tenant_table('sync_runs');
+--> statement-breakpoint
+SELECT app_secure_tenant_table('products');
+--> statement-breakpoint
+SELECT app_secure_tenant_table('skus');
+--> statement-breakpoint
+SELECT app_secure_tenant_table('sku_cost_components');

@@ -22,6 +22,20 @@
       "when": 1791220455124,
       "tag": "0002_identity_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791221547418,
+      "tag": "0003_connections_catalog",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791221549865,
+      "tag": "0004_connections_catalog_rls",
+      "breakpoints": true
     }
   ]
 }

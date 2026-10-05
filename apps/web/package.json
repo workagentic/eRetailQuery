@@ -13,7 +13,7 @@
   "dependencies": {
     "@erq/shared": "workspace:*",
     "@erq/ui": "workspace:*",
-    "@next/env": "^16.3.8",
+    "@next/env": "^15",
     "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.117.2",
     "next": "^15.5.27",

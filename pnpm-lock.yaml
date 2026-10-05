@@ -43,6 +43,8 @@ importers:
 
   packages/metrics: {}
 
+  packages/shared: {}
+
 packages:
 
   '@cacheable/memory@2.2.0':

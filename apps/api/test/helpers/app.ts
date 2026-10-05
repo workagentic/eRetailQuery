@@ -1,35 +1,72 @@
+import { randomUUID } from 'node:crypto';
 import { Test } from '@nestjs/testing';
-import type { INestApplication } from '@nestjs/common';
+import type { INestApplication, Type } from '@nestjs/common';
 import { startTestDatabase, type TestDatabase } from '@erq/db/testing';
+import { generateKeyPair, SignJWT, type KeyLike } from 'jose';
 import { AppModule } from '../../src/app.module';
+import { createJoseVerifier, JWT_VERIFIER } from '../../src/auth/jwt-verifier';
 import { loadEnv } from '../../src/config/env';
+
+export const ISSUER = 'http://issuer.test/auth/v1';
+
+export interface TokenOptions {
+  sub?: string;
+  email?: string;
+  iss?: string;
+  aud?: string;
+  expiresIn?: string;
+  key?: KeyLike;
+}
 
 export interface TestApp {
   app: INestApplication;
   tdb: TestDatabase;
+  privateKey: KeyLike;
+  signToken(opts?: TokenOptions): Promise<string>;
   close(): Promise<void>;
 }
 
-export async function createTestApp(): Promise<TestApp> {
+export async function createTestApp(
+  opts: { extraControllers?: Type<unknown>[] } = {},
+): Promise<TestApp> {
   const tdb = await startTestDatabase();
-  const env = loadEnv({
-    DATABASE_URL: tdb.appUrl,
-    WEB_PUBLIC_URL: 'http://localhost:3000',
-    SUPABASE_JWT_ISSUER: 'http://issuer.test/auth/v1',
-    SUPABASE_JWT_SECRET: 'unused-in-tests',
-    LOG_LEVEL: 'silent',
-  });
-  const moduleRef = await Test.createTestingModule({
-    imports: [AppModule.register(env)],
-  }).compile();
-  const app = moduleRef.createNestApplication();
-  await app.init();
-  return {
-    app,
-    tdb,
-    close: async () => {
-      await app.close();
-      await tdb.stop();
-    },
-  };
+  try {
+    const { publicKey, privateKey } = await generateKeyPair('ES256');
+    const env = loadEnv({
+      DATABASE_URL: tdb.appUrl,
+      WEB_PUBLIC_URL: 'http://localhost:3000',
+      SUPABASE_JWT_ISSUER: ISSUER,
+      SUPABASE_JWT_SECRET: 'unused-in-tests',
+      LOG_LEVEL: 'silent',
+    });
+    const moduleRef = await Test.createTestingModule({
+      imports: [AppModule.register(env, { controllers: opts.extraControllers })],
+    })
+      .overrideProvider(JWT_VERIFIER)
+      .useValue(createJoseVerifier({ key: publicKey, issuer: ISSUER, algorithms: ['ES256'] }))
+      .compile();
+    const app = moduleRef.createNestApplication();
+    await app.init();
+    return {
+      app,
+      tdb,
+      privateKey,
+      signToken: (o = {}) =>
+        new SignJWT({ email: o.email ?? 'owner@example.com' })
+          .setProtectedHeader({ alg: 'ES256' })
+          .setSubject(o.sub ?? randomUUID())
+          .setIssuer(o.iss ?? ISSUER)
+          .setAudience(o.aud ?? 'authenticated')
+          .setIssuedAt()
+          .setExpirationTime(o.expiresIn ?? '1h')
+          .sign(o.key ?? privateKey),
+      close: async () => {
+        await app.close();
+        await tdb.stop();
+      },
+    };
+  } catch (err) {
+    await tdb.stop();
+    throw err;
+  }
 }

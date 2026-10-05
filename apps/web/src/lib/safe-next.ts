@@ -8,7 +8,10 @@ export function safeNextPath(next: string | null | undefined, fallback = '/dashb
     // The URL parser strips tabs/newlines, so "/\t/evil.com" would become "//evil.com"; the origin check catches that.
     const url = new URL(next, BASE);
     if (url.origin !== BASE) return fallback;
-    return url.pathname + url.search;
+    const result = url.pathname + url.search;
+    // Dot-segment collapsing can yield "//host" (e.g. "/..//evil.com"), which browsers treat as scheme-relative.
+    if (!/^\/[^/\\]/.test(result) && result !== '/') return fallback;
+    return result;
   } catch {
     return fallback;
   }

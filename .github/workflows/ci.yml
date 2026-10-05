@@ -1,0 +1,56 @@
+name: ci
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: erq_owner, POSTGRES_PASSWORD: erq_owner, POSTGRES_DB: erq }
+        ports: ['54329:5432']
+        options: >-
+          --health-cmd "pg_isready -U erq_owner" --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      DATABASE_OWNER_URL: postgres://erq_owner:erq_owner@localhost:54329/erq
+      APP_USER_PASSWORD: ci_app_user
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: .nvmrc, cache: pnpm }
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm lint
+      - run: pnpm typecheck
+      - name: Migrations apply cleanly to an empty database
+        run: pnpm db:migrate
+      - name: Unit and integration tests (Testcontainers uses the runner's Docker)
+        run: pnpm test
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: verify
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with: { node-version-file: .nvmrc, cache: pnpm }
+      - uses: supabase/setup-cli@v1
+      - run: pnpm install --frozen-lockfile
+      - run: docker compose up -d
+      - run: supabase start
+      - name: Write .env from local Supabase
+        run: |
+          cp .env.example .env
+          # Drop placeholder lines so the appended values are the only ones (CI uses the HS256 secret path).
+          sed -i '/^NEXT_PUBLIC_SUPABASE_ANON_KEY=$/d;/^SUPABASE_JWT_SECRET=$/d;/^SUPABASE_JWKS_URL=/d' .env
+          supabase status -o env > supabase.env
+          # Map CLI output to the app's variables (names printed by `supabase status -o env`).
+          echo "NEXT_PUBLIC_SUPABASE_ANON_KEY=$(grep '^ANON_KEY=' supabase.env | cut -d'"' -f2)" >> .env
+          echo "SUPABASE_JWT_SECRET=$(grep '^JWT_SECRET=' supabase.env | cut -d'"' -f2)" >> .env
+      - run: pnpm db:migrate
+      - run: pnpm --filter @erq/web exec playwright install --with-deps chromium
+      - run: pnpm test:e2e

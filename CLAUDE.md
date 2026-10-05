@@ -464,3 +464,13 @@ When any of these block a decision, ask the owner rather than guessing.
 - 2026-10-05: Product name in the UI is eRetailQuery everywhere.
 - 2026-10-05: QuickBooks Online is the first accounting integration (Phase 3).
 - 2026-10-05: Production hosting is Vercel plus Supabase, with the API and workers on a persistent host (Railway) because they cannot run on Vercel serverless.
+- 2026-10-05: Phase 0 is specced and planned separately (`docs/superpowers/specs/2026-10-05-phase0-foundations-design.md`). Phase 1 is split into 1a metrics, 1b Shopify + CSV, 1c Meta/Google, 1d dashboard/P&L/Stripe, each with its own spec.
+- 2026-10-05: Auth is Supabase Auth (email + Google). The API verifies Supabase JWTs with `jose`; verify key type against current Supabase docs before launch.
+- 2026-10-05: Tenant isolation uses a transaction-local `app.org_id` set by `withTenant`, a non-superuser `app_user` role, and RLS with FORCE. Pre-org operations use three SECURITY DEFINER functions; the migration role must be superuser or BYPASSRLS.
+- 2026-10-05: Child tables reference parents with composite `(org_id, id)` foreign keys so a row can never point at another tenant's parent.
+- 2026-10-05: Internal packages build to CJS with tsup; the API uses NestJS with the SWC builder; zod is pinned to v3 so zod-to-json-schema can generate OpenAPI bodies.
+- 2026-10-05: NestJS is pinned to ^11 because Nest 12 is ESM-only and breaks the CJS setup. `@swc/core` is pinned to exactly 1.15.47 because 1.16.x fails to load its native addon on the Windows dev machine. Revisit and unpin when resolved or verified on CI.
+- 2026-10-05: Test database is Testcontainers when Docker is available, with an `embedded-postgres` fallback otherwise (the dev machine had no Docker). Override with `ERQ_TEST_DB=docker|embedded|auto`.
+- 2026-10-05: Tailwind v4 theme utilities are used instead of arbitrary `[--var]` classes, and tool config files use `.mts` under TS6 and Vitest 5, to keep ESM config loading working.
+- 2026-10-05: TypeScript is pinned to 6.x until typescript-eslint supports 7. `ignoreDeprecations: "6.0"` is set in `tsconfig.base.json`; remove it on TS7.
+- 2026-10-05: Known unverified at merge: the BullMQ system-worker test and the Playwright e2e were never run, because the dev environment had no Docker or Supabase. The first CI run is their first real execution.

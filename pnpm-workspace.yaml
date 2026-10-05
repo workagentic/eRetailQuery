@@ -3,3 +3,8 @@ packages:
   - 'packages/*'
 allowBuilds:
   esbuild: true
+  # Postgres binaries for the embedded test database fallback (no Docker in some dev environments).
+  '@embedded-postgres/windows-x64': true
+  cpu-features: false
+  protobufjs: false
+  ssh2: false

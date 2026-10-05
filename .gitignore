@@ -10,3 +10,4 @@ test-results
 supabase/.temp
 *.tsbuildinfo
 AGENTS.md
+next-env.d.ts

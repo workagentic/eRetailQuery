@@ -1,0 +1,8 @@
+@import 'tailwindcss';
+@import '@erq/ui/theme.css';
+@source '../../../../packages/ui/src';
+
+body {
+  background: var(--color-background);
+  color: var(--color-foreground);
+}

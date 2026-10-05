@@ -14,6 +14,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "pino": "^10.4.0"
+    "pino": "^10.4.0",
+    "zod": "^3.25.76"
   }
 }

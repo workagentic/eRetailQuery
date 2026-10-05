@@ -29,3 +29,4 @@ export async function runMigrations(ownerUrl: string, appUserPassword: string): 
 }
 
 export { Pool };
+export { seedDemoOrg, DEMO_ORG_ID, DEMO_USER_IDS } from './seed';

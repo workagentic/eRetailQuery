@@ -1,0 +1,466 @@
+# CLAUDE.md - eRetailQuery
+
+Domain: eretailquery.com
+Owner: Abdullah Shekha
+Status: Greenfield. Build in the phases defined in section 12. Do not skip ahead.
+
+---
+
+## 1. Product Vision
+
+eRetailQuery is a multi-tenant SaaS web app for US ecommerce and retail business owners. It connects their sales channels (Shopify, WooCommerce, Amazon) and ad platforms (Meta, Google, TikTok) into one place and answers the questions an owner asks every day:
+
+- Am I actually making money, per SKU, per channel, per campaign?
+- What should I price this at?
+- What is about to run out?
+- Which ads should I scale and which should I kill?
+- Who are my best customers and how do I keep them?
+
+North star: **reduce the time and expertise an owner needs to run their ecommerce business.** Every screen should answer a question or recommend an action, not just display numbers. Prefer "Pause this ad, it loses $212 per week" over a table of metrics.
+
+Target user: a non-technical owner or small team doing roughly $250K to $20M per year, selling on one or more channels, spending on one or more ad platforms. They are not analysts. Use plain English labels, not jargon, and show a short tooltip for any financial term.
+
+---
+
+## 2. Core Principles
+
+1. **Profit first, revenue second.** Every revenue number should be traceable to a profit number.
+2. **Opinionated defaults.** The app should work well with zero configuration. Settings are for overriding, not for getting started.
+3. **Plain language.** "Cost of goods" not "COGS" in primary UI (show COGS in tooltip). "Money left after ads" not "contribution margin after marketing" (show the formal term in tooltip).
+4. **Explain every flag.** Any warning (low ROAS, low stock, bad margin) must show why it fired and what to do.
+5. **Never lose data trust.** Show "last synced" timestamps. Never silently show stale or partial data. If a sync failed, say so on the affected widget.
+6. **Money is stored as integer cents** with an ISO currency code. Never use floats for money. Use `Decimal` or integer math only.
+7. **Multi-tenant isolation is non-negotiable.** Every tenant-owned table carries `org_id` and is protected by Postgres Row Level Security.
+
+---
+
+## 3. Tech Stack
+
+The owner is an experienced full-stack developer. Use his preferred stack.
+
+| Layer | Choice |
+|---|---|
+| Frontend | Next.js (App Router), TypeScript, Tailwind CSS, shadcn/ui, Recharts, TanStack Query, TanStack Table |
+| Backend API | NestJS (TypeScript), REST with OpenAPI docs, class-validator DTOs |
+| Database | PostgreSQL (Supabase for dev, AWS RDS or Supabase for prod), Drizzle or Prisma ORM (pick Drizzle unless a blocker appears) |
+| Jobs and sync | BullMQ on Redis for scheduled syncs, webhook processing, report generation |
+| Auth | Supabase Auth or Auth.js, email plus Google sign-in, org-based membership and roles |
+| File storage | S3 compatible (CSV imports, report PDFs) |
+| Hosting | Vercel (web), Supabase (Postgres, auth, storage), Railway for the NestJS API, BullMQ workers and Redis. Vercel serverless cannot run long-lived workers, so the API and workers must live on a persistent host. Move to AWS later only if scale or cost requires it. |
+| Billing | Stripe Billing (subscriptions, metered tiers later) |
+| Email | Resend or Postmark (transactional), loyalty emails later via provider abstraction |
+| Observability | Sentry, structured logging (pino), job dashboard (bull-board) |
+| Testing | Vitest or Jest (unit), Playwright (e2e), Testcontainers for integration tests |
+| AI layer (phase 4) | Claude API for natural language questions and weekly insight summaries |
+
+Monorepo with pnpm workspaces and Turborepo.
+
+```
+eretailquery/
+  apps/
+    web/            Next.js frontend
+    api/            NestJS API
+    worker/         BullMQ workers (sync, webhooks, reports)
+  packages/
+    db/             Schema, migrations, RLS policies, seed data
+    shared/         Types, zod schemas, money utils, constants
+    connectors/     One folder per integration (see section 6)
+    metrics/        Pure functions for ROAS, margin, markup, P&L (heavily unit tested)
+    ui/             Shared UI components
+  docs/
+  CLAUDE.md
+```
+
+---
+
+## 4. Domain Glossary (use these exact terms in code)
+
+| Term | Meaning |
+|---|---|
+| Organization (`org`) | A tenant. One business. Has many members and many connected stores. |
+| Store connection | A linked sales channel account (Shopify shop, WooCommerce site, Amazon seller account). |
+| Ad connection | A linked ad account (Meta, Google Ads, TikTok Ads, etc). |
+| Product | A sellable item definition. |
+| SKU / Variant | A specific sellable variation with its own cost, price, and stock. The SKU is the unit of profitability. |
+| Landed cost | Everything it costs to get one unit into sellable inventory: product cost, inbound freight, duties, packaging, labeling, prep. This is the "COGS breakdown" the owner asked for. |
+| Fulfillment cost | Per order variable costs after the sale: pick and pack, outbound shipping, payment processing fee, marketplace referral fee, FBA fee. |
+| COGS | Landed cost of units sold. Accounting term for what the owner described as "cost price". |
+| Contribution margin | Revenue minus COGS minus fulfillment cost minus discounts. Before ad spend. |
+| Net contribution | Contribution margin minus allocated ad spend. |
+| Markup | `(price - cost) / cost`. |
+| Margin | `(price - cost) / price`. |
+| ROAS | Revenue attributed to an ad or campaign divided by its spend. Platform reported. |
+| Blended ROAS (also called MER) | Total store revenue divided by total ad spend across all platforms. Not platform reported. |
+| Break-even ROAS | `1 / contribution margin %` before ads. A campaign below this loses money. |
+| Target ROAS | Break-even ROAS adjusted for the owner's desired profit. |
+| Location | A place that holds inventory: warehouse, retail store, 3PL, Amazon FBA. |
+
+IMPORTANT: Markup and margin are different. A 50% to 100% markup range equals a **33.3% to 50% margin** range. Always label which one is displayed. Default the UI to show both side by side.
+
+---
+
+## 5. Data Model (starting point)
+
+Use snake_case. Every tenant table has `id` (uuid), `org_id`, `created_at`, `updated_at`. Add RLS policy `org_id = current_setting('app.org_id')::uuid` or the Supabase equivalent.
+
+### Identity and tenancy
+- `orgs`, `org_members` (role: owner, admin, analyst, viewer), `invites`
+- `subscriptions` (Stripe ids, plan, status)
+
+### Connections
+- `store_connections` (platform, external_account_id, status, encrypted_credentials, scopes, last_synced_at, last_error)
+- `ad_connections` (platform, external_account_id, status, encrypted_credentials, last_synced_at, last_error)
+- `sync_runs` (connection_id, type, started_at, finished_at, status, records_processed, error)
+
+### Catalog and costs
+- `products` (title, brand, category, status)
+- `skus` (product_id, sku_code, barcode, selling_price_cents, compare_at_price_cents, currency, target_markup_pct, status)
+- `sku_channel_listings` (sku_id, store_connection_id, external_product_id, external_variant_id, channel_price_cents)
+- `sku_cost_components` (sku_id, component_type, amount_cents, per_unit, effective_from, effective_to)
+  - `component_type` enum: `product_cost`, `inbound_freight`, `duties_tariffs`, `packaging`, `labeling_prep`, `other_landed`
+  - Costs are time versioned. Historical orders must use the cost effective on the order date.
+- `sku_fulfillment_costs` (sku_id or channel level, type enum: `pick_pack`, `outbound_shipping`, `payment_fee_pct`, `payment_fee_fixed`, `marketplace_fee_pct`, `fba_fee`, `returns_allowance_pct`)
+- `promotions` (name, type: percent/fixed/bogo/free_shipping, value, starts_at, ends_at, scope sku/collection/channel)
+- `promotion_skus`
+
+### Inventory
+- `locations` (name, type: warehouse/store/3pl/fba/other, address)
+- `inventory_levels` (sku_id, location_id, on_hand, reserved, incoming, reorder_point, safety_stock)
+- `inventory_movements` (sku_id, location_id, delta, reason, ref_type, ref_id) - append only ledger
+- `purchase_orders`, `purchase_order_lines` (phase 3)
+
+### Orders and customers
+- `customers` (org_id, email_hash, email_encrypted, name, first_order_at, last_order_at, total_orders, total_spent_cents, source_platform, marketing_consent)
+- `customer_identities` (customer_id, platform, external_id) - to merge the same person across channels
+- `orders` (store_connection_id, external_order_id, customer_id, placed_at, status, gross_cents, discount_cents, shipping_charged_cents, tax_cents, refund_cents, net_cents, utm_source, utm_medium, utm_campaign, landing_site)
+- `order_lines` (order_id, sku_id, quantity, unit_price_cents, discount_cents, unit_cogs_cents_snapshot)
+- `refunds`, `cancellations`
+- `support_tickets` (customer_id, source, category, status, opened_at, closed_at) - manual entry in phase 2, helpdesk integrations later
+
+### Advertising
+- `ad_campaigns`, `ad_sets`, `ads` (platform, external_id, name, status, objective)
+- `ad_insights_daily` (ad_id, date, spend_cents, impressions, clicks, platform_conversions, platform_revenue_cents)
+- `ad_flags` (ad_id, flag_type: winning/losing/watch, reason, computed_at)
+
+### Loyalty (phase 3)
+- `loyalty_programs`, `loyalty_tiers`, `loyalty_accounts`, `loyalty_transactions`, `loyalty_rewards`
+
+### Reporting
+- `report_snapshots` (period_type, period_start, period_end, payload_json, generated_at)
+- `alerts` (type, severity, entity_ref, message, resolved_at)
+
+Index every `(org_id, date)` and `(org_id, sku_id)` combination used by dashboards. Use materialized views or summary tables (`sku_daily_metrics`, `channel_daily_metrics`) refreshed by workers for dashboard speed.
+
+---
+
+## 6. Integrations
+
+Build every connector behind a common interface in `packages/connectors`:
+
+```ts
+interface StoreConnector {
+  connect(oauthParams): Promise<Connection>
+  backfill(connection, since: Date): AsyncIterable<NormalizedOrder | NormalizedProduct | NormalizedInventory>
+  syncIncremental(connection, cursor): Promise<SyncResult>
+  handleWebhook(payload, headers): Promise<void>
+  pushPrice?(sku, price): Promise<void>        // phase 4
+  pushInventory?(sku, location, qty): Promise<void>  // phase 4
+}
+interface AdConnector {
+  connect(oauthParams): Promise<Connection>
+  syncInsights(connection, dateRange, level: 'campaign'|'adset'|'ad'): Promise<SyncResult>
+}
+```
+
+Connectors normalize into our schema. No platform specific fields leak outside `packages/connectors`.
+
+### 6.1 Sales channels
+| Platform | Notes |
+|---|---|
+| Shopify | OAuth app, Admin GraphQL API, webhooks for orders, products, inventory, app uninstall. Must implement mandatory privacy webhooks (customer data request, customer erasure, shop erasure). Protected customer data access requires approval in Partner dashboard. |
+| WooCommerce | REST API with consumer key and secret generated by the merchant, or an app authorization endpoint flow. Webhooks per topic. Handle self hosted sites with unreliable uptime and HTTP rate limits. |
+| Amazon | Selling Partner API (SP-API). Requires developer registration and app approval. Buyer PII is heavily restricted, so customer level features on Amazon data are limited (no buyer email). Fees and settlement data come from the Finances and Reports APIs. Design the customer module so Amazon orders create anonymous or limited customer records. |
+
+Later channels: BigCommerce, Etsy, eBay, Walmart Marketplace, TikTok Shop, Square and Shopify POS for physical stores.
+
+### 6.2 Ad platforms
+| Platform | Notes |
+|---|---|
+| Meta Ads | Marketing API, OAuth, requires app review for advanced access. Pull daily insights at ad level. |
+| Google Ads | Google Ads API, requires developer token approval. Include Performance Max and Shopping campaign types. |
+| TikTok Ads | TikTok Marketing API, requires app approval. |
+| Recommended additions | Microsoft (Bing) Ads, Pinterest Ads, Snapchat Ads, Amazon Ads, Reddit Ads, Klaviyo or Mailchimp (email and SMS revenue and cost, for channel comparison) |
+
+IMPORTANT: Approval for Shopify protected data, Amazon SP-API, Meta, Google Ads, and TikTok can take days to weeks. Start these applications in week 1 of phase 1. Verify the current requirements in each platform's official docs before building, since policies change.
+
+### 6.3 Connector rules
+- Store credentials encrypted at rest (AES-256-GCM with a KMS managed key). Never log tokens.
+- Webhook endpoints verify signatures and are idempotent (dedupe by external id plus event id).
+- Initial backfill is chunked and resumable. Show progress to the user.
+- Respect rate limits with per-connection token buckets and exponential backoff.
+- Ad platform data is re-pulled for the trailing 7 days on every sync because platforms revise numbers.
+- Handle currency. Store original currency and convert to the org reporting currency using a daily FX table. Default USD.
+- Fallback for any platform: CSV upload with a column mapping UI. This also serves as the first onboarding path for users without API access.
+
+---
+
+## 7. Business Logic (implement in `packages/metrics`, pure functions, fully unit tested)
+
+### 7.1 SKU pricing
+Inputs: landed cost components, fulfillment cost assumptions, discounts, selling price.
+
+```
+landed_cost       = sum(cost components)
+variable_cost     = landed_cost + fulfillment_costs + payment/marketplace fees
+markup_pct        = (price - landed_cost) / landed_cost
+margin_pct        = (price - landed_cost) / price
+contribution_pct  = (price - discount - variable_cost) / (price - discount)
+ideal_price_low   = landed_cost * 1.5      // 50% markup
+ideal_price_high  = landed_cost * 2.0      // 100% markup
+```
+
+Display for each SKU: current price, markup, margin, ideal price range, and a status:
+- Below range: "Underpriced. Raise to at least $X."
+- In range: "Healthy."
+- Above range: "Premium. Check that it is still selling."
+
+Make the target markup range configurable per org and per category (default 50% to 100%). Also compute a **floor price** that guarantees a minimum contribution margin after fees and shipping, because a good looking markup can still lose money once shipping and fees are included. Show a warning when the markup looks fine but contribution is negative.
+
+Promotions: show margin at the discounted price, and show the maximum discount that still keeps contribution above the owner's minimum.
+
+### 7.2 Inventory
+- Stock by location and total, available = on_hand minus reserved.
+- Daily sales velocity using trailing 7, 30, 90 day windows, weighted toward recent.
+- `days_of_cover = available / velocity`.
+- Flag **low stock** when days_of_cover is less than supplier lead time plus safety buffer (default 14 days if lead time unknown), or available is at or below reorder_point.
+- Flag **overstock** when days_of_cover exceeds 180 days.
+- Flag **dead stock** when no sales in 90 days.
+- Suggested reorder quantity (phase 3): `velocity * (lead_time + cover_target) - available - incoming`.
+
+### 7.3 Advertising
+```
+roas              = platform_revenue / spend
+blended_roas      = total_store_revenue / total_ad_spend        // MER
+break_even_roas   = 1 / avg_contribution_margin_pct_before_ads
+cpa               = spend / conversions
+```
+
+Flag rules (thresholds configurable per org, defaults below):
+- **Winning**: ROAS >= 1.5 x break-even, spend over minimum data threshold (default $50 and 1,000 impressions in the window), trending stable or up.
+- **Losing**: ROAS < break-even for 7 days with spend over threshold. Estimated daily loss shown.
+- **Watch**: between break-even and 1.5 x break-even, or declining more than 20 percent week over week.
+- **Learning**: not enough data. Never flag these as losing.
+- If an org has no cost data, fall back to generic bands (below 1.5 poor, 1.5 to 3 average, above 3 good) and prompt the user to add costs for accurate flags.
+
+Display both platform reported ROAS and blended ROAS. Add a tooltip explaining that platform numbers can overlap and over claim, and that blended ROAS is the honest overall number. A first party tracking pixel is a phase 4 item. Until then, use UTM data from orders where available as a second opinion.
+
+### 7.4 Customers
+- Repeat customer: 2 or more non-cancelled orders.
+- Repeat rate, average order value, orders per customer, days between orders.
+- Cancellation rate and refund rate per customer and per SKU.
+- Complaint count from support tickets.
+- Customer lifetime value (observed, then predicted in phase 4).
+- RFM segments (Recency, Frequency, Monetary): Champions, Loyal, At Risk, Lost, New.
+- Top customers by net spend. Top products by channel. First product bought vs repeat products.
+- Flag "high value but at risk" customers (top quartile spend, no order in 1.5x their usual gap).
+
+### 7.5 Loyalty program (phase 3)
+Configurable points program:
+- Earn rules: points per dollar, bonus actions (account creation, review, referral, birthday).
+- Tiers: thresholds by spend or points, with perks.
+- Redemption: discount codes pushed to Shopify and WooCommerce via API. Amazon customers cannot be enrolled (no contact data).
+- Liability tracking: outstanding points valued in dollars, shown on the P&L as an accrual.
+- Start simple: points plus one redemption type (fixed dollar discount code). Do not build a full loyalty platform in v1.
+
+### 7.6 Reports and P&L
+Periods: month, quarter, year, custom range, with comparison to the previous period and the same period last year.
+
+P&L structure:
+```
+Gross sales
+- Discounts
+- Refunds and returns
+= Net sales
+- COGS (landed cost of units sold, using cost snapshot at order time)
+= Gross profit
+- Fulfillment: shipping, pick and pack
+- Payment processing fees
+- Marketplace fees
+= Contribution margin
+- Ad spend (by platform)
+= Net contribution after marketing
+- Other operating expenses (manual entry: rent, salaries, software, etc)
+= Estimated operating profit
+```
+
+Breakdowns by: sales channel, ad platform, product, category, customer segment.
+Best and worst rankings: channels, ad platforms, campaigns, SKUs, with plain English call outs ("Meta lost $1,240 this quarter, TikTok earned $3,980").
+Exports: PDF and CSV. Scheduled email delivery (monthly summary to the owner).
+Disclaimer: reports are management estimates, not accounting or tax filings. Offer QuickBooks Online and Xero export or sync in phase 3.
+
+---
+
+## 8. Frontend: Screens
+
+1. **Onboarding wizard**: Connect store, connect ads, import SKUs and costs (CSV or auto from store), set targets. Show "Time to first insight" under 10 minutes as the goal. Skippable steps with sensible defaults.
+2. **Home dashboard**
+   - Today strip: revenue, orders, ad spend, blended ROAS, estimated profit
+   - "What needs your attention" feed (top 5 prioritized alerts with one click actions)
+   - Inventory snapshot, ads snapshot, channel snapshot
+   - Date range selector and channel filter apply globally
+3. **Products and pricing**: table with price, cost, markup, margin, ideal range, stock, status chips. Detail drawer with cost breakdown editor, promotion simulator, price history. Bulk edit and CSV import.
+4. **Inventory**: by location, low stock list, days of cover, reorder suggestions, stock movements.
+5. **Advertising**: channel comparison, campaign and ad tables, winning and losing tabs, spend vs revenue trend, flagged items with reason and suggested action.
+6. **Customers**: list with search, segments, profile page (orders, products, refunds, tickets, loyalty), top customers, cohort retention chart.
+7. **Loyalty**: program builder, members, liability.
+8. **Reports**: pick period, view P&L, drill down, export, schedule.
+9. **Alerts and settings**: thresholds, notification channels (email first, Slack later), team members, billing, connections health.
+
+UX rules:
+- Mobile responsive. Owners check this on their phone.
+- Every table: sortable, filterable, CSV export, saved views.
+- Empty states explain the next step and offer a one click action.
+- Loading skeletons, never spinners that block the page.
+- Accessibility: WCAG AA, keyboard navigable.
+
+---
+
+## 9. Security and Compliance
+
+- Encrypt all third party credentials. Rotate encryption keys via KMS.
+- RLS on all tenant tables plus API level org checks. Add an automated test that proves tenant A cannot read tenant B for every table.
+- Role based access (owner, admin, analyst, viewer). Cost data may be hidden from viewer role.
+- Audit log for connection changes, cost edits, price pushes, and exports.
+- PII: store email encrypted plus a hash for lookup. Support customer data export and deletion requests (Shopify mandatory webhooks, CCPA, GDPR for any EU visitors).
+- Never put secrets in the repo. Use `.env.example` and a secrets manager.
+- Terms of service and privacy policy pages required before launch. Cookie banner on the marketing site.
+- Marketing consent flag respected before any loyalty or promotional email.
+
+---
+
+## 10. Engineering Conventions
+
+- TypeScript strict mode everywhere. No `any` without a comment.
+- Validate all inputs with zod at API boundaries. Share schemas via `packages/shared`.
+- Conventional Commits. Small PRs. One feature per branch.
+- Database changes only through migrations. Never edit the schema by hand.
+- Business logic lives in `packages/metrics` and service classes, never in controllers or React components.
+- Every metric function has unit tests with edge cases (zero revenue, zero spend, missing cost, refunds exceeding sales, timezone boundaries).
+- Timezones: store UTC, report in the org's configured timezone. Daily rollups use the org timezone.
+- API: REST, plural nouns, cursor pagination, consistent error shape `{ error: { code, message, details } }`.
+- Background jobs are idempotent and safe to retry.
+- Feature flags for anything unfinished.
+- Provide a seed script that generates a realistic demo org (3 channels, 3 ad platforms, 200 SKUs, 12 months of orders) so every screen can be developed and demoed without live APIs. Also use it for the public demo mode.
+
+### Commands (create these scripts)
+```
+pnpm dev            # run web, api, worker
+pnpm db:migrate     # apply migrations
+pnpm db:seed        # load demo data
+pnpm test           # unit tests
+pnpm test:e2e       # Playwright
+pnpm lint           # eslint + prettier check
+pnpm typecheck
+```
+
+### Definition of done
+A feature is done when: typed, validated, tested (unit plus at least one integration or e2e path), RLS verified, loading and error and empty states handled, mobile checked, and documented in `docs/`.
+
+---
+
+## 11. Pricing Model (for Stripe setup later)
+
+Suggested starting point, to be validated with early users:
+- Free: 1 store, 1 ad account, 50 SKUs, 30 day history, limited dashboard
+- Growth: about $49 to $99 per month, 3 stores, 3 ad accounts, unlimited SKUs, full history, reports, alerts
+- Pro: about $149 to $299 per month, unlimited connections, loyalty, AI insights, team seats, scheduled reports
+Price tiers by order volume rather than revenue where possible, since revenue based pricing is a common complaint about competitors. Offer a 14 day trial on paid plans.
+
+---
+
+## 12. Build Phases
+
+### Phase 0 (week 1): Foundations
+Repo, monorepo, CI, auth, orgs and roles, base schema with RLS, design system, seed script. Submit developer app applications to Shopify, Amazon, Meta, Google Ads, TikTok.
+
+### Phase 1 (weeks 2 to 6): The profit core (MVP)
+- Shopify connector (products, orders, inventory) plus CSV import fallback
+- SKU module with cost breakdown, markup and margin, ideal price range
+- Three cost entry paths: auto import from Shopify cost per item, CSV upload with column mapping, and manual entry in the app. Imported costs pre-fill the product cost component only; the owner completes freight, packaging and other components.
+- Shopify POS sales ingested through the same orders sync, tagged with a channel of `shopify_pos` so online and in-store results are reported separately
+- Inventory locations: Shopify locations sync automatically, plus manual stock counts for locations Shopify does not track
+- Meta Ads insights sync (first ad connector, build and ship before any other ad platform), then Google Ads insights sync
+- Home dashboard with blended ROAS, ROAS by channel, winning and losing ad flags, low stock list
+- Monthly P&L report
+- Stripe billing
+Goal: a Shopify merchant connects and sees real profit in under 10 minutes.
+
+### Phase 2 (weeks 7 to 12): Breadth and customers
+- WooCommerce and TikTok Ads connectors
+- Multi location inventory and movements
+- Customer module: profiles, repeat behavior, cancellations, refunds, RFM, top customers, manual complaints log
+- Quarterly and annual reports, comparisons, PDF and CSV export
+- Alerts via email
+- Promotion simulator
+
+### Phase 3 (weeks 13 to 20): Amazon and retention
+- Amazon SP-API connector, fees and settlement based profit
+- Loyalty program v1
+- Purchase orders and reorder suggestions
+- QuickBooks Online and Xero sync
+- Klaviyo or Mailchimp integration
+- Pinterest, Microsoft, Snapchat Ads
+
+### Phase 4: Intelligence and automation
+- AI assistant ("Ask eRetailQuery"): natural language questions answered from the tenant's own data using Claude API with tool calls to read only functions. Weekly plain English summary email.
+- First party tracking pixel and server side events for better attribution
+- Demand forecasting
+- Push price and inventory changes back to channels with approval workflow
+- Supplier management, landed cost calculator, tariff impact simulator
+- Slack and WhatsApp alerts, mobile app or PWA
+- Agency and multi store accounts
+
+---
+
+## 13. Out of Scope for v1
+
+Do not build: a storefront or checkout, a full ERP or accounting ledger, a helpdesk (only light ticket logging), shipping label purchase, SMS or email campaign sending, multi-language UI, non-US tax compliance. Revisit after launch.
+
+---
+
+## 14. Open Questions for the Owner (ask before building the affected area)
+
+1. RESOLVED: the product is named eRetailQuery everywhere in the UI.
+2. RESOLVED: first target segment is Shopify DTC brands (see Decisions Log).
+3. RESOLVED: all three cost entry paths ship in Phase 1 (see Decisions Log).
+4. RESOLVED: v1 includes both Shopify POS sales and manual-count inventory locations (see Decisions Log).
+5. RESOLVED: QuickBooks Online is the first accounting sync target in Phase 3. Xero comes later.
+6. RESOLVED: Vercel plus Supabase for production (see section 3 and Decisions Log). Budget and region still to be confirmed before launch.
+7. RESOLVED: yes, a limited free plan at launch (see section 11).
+
+When any of these block a decision, ask the owner rather than guessing.
+
+---
+
+## 15. Instructions for Claude Code
+
+- Start with Phase 0. Propose the exact folder structure and migration plan, wait for approval, then build.
+- Work in small vertical slices that run end to end (DB, API, UI, test).
+- Before adding a dependency, state why and prefer what is already in the stack.
+- Never hardcode API keys. Never commit secrets.
+- When a platform API behavior is uncertain, check the official documentation rather than assuming, and note the doc link in a code comment.
+- Keep this file updated as decisions are made. Add a "Decisions Log" section at the bottom with date and rationale.
+- If a requirement here conflicts with security or data accuracy, raise it instead of silently picking one.
+
+---
+
+## Decisions Log
+
+- 2026-10-05: First target segment is Shopify DTC brands. WooCommerce and Amazon follow in later phases.
+- 2026-10-05: Meta Ads is the first ad connector, delivered in Phase 1 alongside Shopify.
+- 2026-10-05: All three cost entry paths (Shopify import, CSV, manual) ship in Phase 1.
+- 2026-10-05: v1 includes Shopify POS sales and manual-count inventory locations. Third-party POS systems are out of scope.
+- 2026-10-05: A limited free plan exists at launch. Exact limits follow section 11 until revised.
+- 2026-10-05: Product name in the UI is eRetailQuery everywhere.
+- 2026-10-05: QuickBooks Online is the first accounting integration (Phase 3).
+- 2026-10-05: Production hosting is Vercel plus Supabase, with the API and workers on a persistent host (Railway) because they cannot run on Vercel serverless.

@@ -40,13 +40,16 @@ Database tests use Testcontainers when Docker is reachable, otherwise they fall 
 
 Not yet verified: the Redis/BullMQ system-worker test and the Playwright e2e both need Docker, and neither has been run in the original dev environment (no Docker or Supabase there). Treat the first CI run as their first real execution.
 
+Low disk: each package's tests start their own Postgres, so run them serially with `pnpm turbo run test --concurrency=1`. Parallel runs can hit ENOSPC on small disks. Leftover `erq-pg-*` folders in the OS temp directory can be deleted.
+
 ## Running the e2e (needs Docker)
 
 1. `docker compose up -d`
 2. `supabase start` (API on 54321, DB 54322, Studio 54323, Inbucket 54324). After editing `supabase/config.toml`, run `supabase stop && supabase start`.
 3. Wire `.env` (see checklist below), then `pnpm db:migrate`, so the API has its schema before it starts.
 4. `pnpm --filter @erq/web exec playwright install chromium`
-5. `pnpm test:e2e`
+5. `pnpm build` (Playwright starts the api and web dev servers without turbo, so workspace packages' `dist/` must already exist)
+6. `pnpm test:e2e`
 
 ### Env wiring checklist
 
@@ -75,3 +78,9 @@ Ports: Supabase uses 54321 to 54324; compose uses 54329 (Postgres) and 6379 (Red
 - Viewer user: `00000000-0000-4000-8000-0000000000a3`
 
 These user ids are not Supabase auth users; they exist as `org_members.user_id` values for development and tests.
+
+## Production checklist
+
+- Supabase email confirmation MUST be enabled. Invite acceptance trusts the JWT `email` claim, so an unconfirmed address would let someone claim an invite sent to another person (see [tenancy](architecture/tenancy.md), SECURITY DEFINER functions).
+- Keep anonymous sign-ins off. The API also rejects tokens with `is_anonymous: true`.
+- If this database lives in a Supabase project, keep migration `0006_security_hardening.sql` and do not grant `anon` or `authenticated` anything in `public` (or disable the Data API for `public`). Supabase grants them privileges by default, and the migration revokes them.

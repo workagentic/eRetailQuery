@@ -5,6 +5,11 @@ allowBuilds:
   esbuild: true
   # Postgres binaries for the embedded test database fallback (no Docker in some dev environments).
   '@embedded-postgres/windows-x64': true
+  '@embedded-postgres/linux-x64': true
+  '@embedded-postgres/linux-arm64': true
+  '@embedded-postgres/darwin-arm64': true
+  '@embedded-postgres/darwin-x64': true
+  # unused native extras; pnpm 11 strictDepBuilds requires an explicit decision
   cpu-features: false
   protobufjs: false
   ssh2: false

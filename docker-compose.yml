@@ -6,9 +6,19 @@ services:
       POSTGRES_PASSWORD: erq_owner
       POSTGRES_DB: erq
     ports: ['54329:5432']
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U erq_owner -d erq']
+      interval: 5s
+      timeout: 5s
+      retries: 10
     volumes: ['pgdata:/var/lib/postgresql/data']
   redis:
     image: redis:7-alpine
     ports: ['6379:6379']
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
 volumes:
   pgdata:

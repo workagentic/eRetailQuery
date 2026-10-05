@@ -1,15 +1,17 @@
 import type { Server } from 'node:http';
 import { connect, type AddressInfo } from 'node:net';
 import { Controller, Get, UseGuards } from '@nestjs/common';
-import { generateKeyPair } from 'jose';
+import { generateKeyPair, SignJWT } from 'jose';
 import request from 'supertest';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { AuthGuard } from '../src/auth/auth.guard';
 import { CurrentOrg, CurrentUser, Roles } from '../src/auth/decorators';
 import { OrgGuard } from '../src/auth/org.guard';
 import { RolesGuard } from '../src/auth/roles.guard';
-import { createTestApp, type TestApp } from './helpers/app';
-import { createJoseVerifier } from '../src/auth/jwt-verifier';
+import { createTestApp, ISSUER, type TestApp } from './helpers/app';
+import { buildVerifierFromEnv } from '../src/auth/jwt-verifier';
+import { ApiError } from '../src/common/api-error';
+import { loadEnv } from '../src/config/env';
 
 @Controller('probe')
 class ProbeController {
@@ -22,6 +24,12 @@ class ProbeController {
   @Get('org')
   @UseGuards(AuthGuard, OrgGuard, RolesGuard)
   org(@CurrentOrg() o: { orgId: string; role: string }) {
+    return o;
+  }
+
+  @Get('orgs/:orgId')
+  @UseGuards(AuthGuard, OrgGuard, RolesGuard)
+  orgScoped(@CurrentOrg() o: { orgId: string }) {
     return o;
   }
 
@@ -95,8 +103,13 @@ describe('authentication', () => {
       sock.on('data', (d) => {
         data += d.toString('latin1');
       });
+      sock.setTimeout(5000, () => sock.destroy());
       sock.on('error', reject);
-      sock.on('close', () => resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(data)?.[1] ?? 400)));
+      // 0 when no parseable response arrived: fails the 4xx assertions below.
+      sock.on('close', () => {
+        sock.destroy();
+        resolve(Number(/^HTTP\/1\.1 (\d{3})/.exec(data)?.[1] ?? 0));
+      });
       sock.write(
         'GET /probe/user HTTP/1.1\r\nHost: x\r\nConnection: close\r\nAuthorization: bearer\u0000x\r\n\r\n',
         'latin1',
@@ -120,6 +133,28 @@ describe('authentication', () => {
       expect((await get('/probe/user').set('authorization', `Bearer ${token}`)).status).toBe(401);
     }
   });
+  it('rejects tokens without exp, with an empty email, or from anonymous sign-ins', async () => {
+    for (const opts of [
+      { noExp: true },
+      { email: '' },
+      { email: '   ' },
+      { extraClaims: { is_anonymous: true } },
+    ]) {
+      const token = await tt().signToken({ sub: U_OWNER, ...opts });
+      expect((await get('/probe/user').set('authorization', `Bearer ${token}`)).status).toBe(401);
+    }
+  });
+  it('rejects an alg:none token', async () => {
+    const b64 = (o: object) => Buffer.from(JSON.stringify(o)).toString('base64url');
+    const token = `${b64({ alg: 'none', typ: 'JWT' })}.${b64({
+      sub: U_OWNER,
+      email: 'owner@example.com',
+      iss: ISSUER,
+      aud: 'authenticated',
+      exp: Math.floor(Date.now() / 1000) + 3600,
+    })}.`;
+    expect((await get('/probe/user').set('authorization', `Bearer ${token}`)).status).toBe(401);
+  });
   it('rejects a non-uuid sub instead of passing it to Postgres', async () => {
     const token = await tt().signToken({ sub: "x'; drop table orgs;--" });
     expect((await get('/probe/user').set('authorization', `Bearer ${token}`)).status).toBe(401);
@@ -139,6 +174,24 @@ describe('org context', () => {
     expect((await get('/probe/org').set(auth)).status).toBe(400);
     expect((await get('/probe/org').set({ ...auth, 'x-org-id': 'not-a-uuid' })).status).toBe(400);
     expect((await get('/probe/org').set({ ...auth, 'x-org-id': "1' or '1'='1" })).status).toBe(400);
+  });
+  it('400s with org_mismatch when the header and URL org differ', async () => {
+    const token = await tt().signToken({ sub: U_OWNER });
+    const res = await get(`/probe/orgs/${ORG_A}`).set({
+      authorization: `Bearer ${token}`,
+      'x-org-id': ORG_B,
+    });
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('org_mismatch');
+  });
+  it('treats the X-Org-Id header case-insensitively in value', async () => {
+    const token = await tt().signToken({ sub: U_VIEWER });
+    const res = await get('/probe/org').set({
+      authorization: `Bearer ${token}`,
+      'X-Org-Id': ORG_A.toUpperCase(),
+    });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ orgId: ORG_A, role: 'viewer' });
   });
   it('403s for orgs the user does not belong to', async () => {
     const token = await tt().signToken({ sub: U_OWNER });
@@ -183,12 +236,36 @@ describe('roles', () => {
 });
 
 describe('verifier factory', () => {
-  it('rejects tokens when the key is a mismatched HS256 secret', async () => {
-    const v = createJoseVerifier({
-      key: new TextEncoder().encode('secret'),
-      issuer: 'x',
-      algorithms: ['HS256'],
+  const SECRET = 's3cret-s3cret-s3cret-s3cret-s3cret';
+  const verifier = () =>
+    buildVerifierFromEnv(
+      loadEnv({
+        DATABASE_URL: 'postgres://x@y/z',
+        WEB_PUBLIC_URL: 'http://a.test',
+        SUPABASE_JWT_ISSUER: ISSUER,
+        SUPABASE_JWT_SECRET: SECRET,
+      }),
+    );
+  const sign = (secret: string) =>
+    new SignJWT({ email: 'Person@Example.com' })
+      .setProtectedHeader({ alg: 'HS256' })
+      .setSubject(U_OWNER)
+      .setIssuer(ISSUER)
+      .setAudience('authenticated')
+      .setExpirationTime('1h')
+      .sign(new TextEncoder().encode(secret));
+
+  it('accepts an HS256 token signed with the configured secret', async () => {
+    await expect(verifier().verify(await sign(SECRET))).resolves.toEqual({
+      userId: U_OWNER,
+      email: 'person@example.com',
     });
-    await expect(v.verify('a.b.c')).rejects.toThrow();
+  });
+  it('rejects a token signed with a different secret', async () => {
+    const err = await verifier()
+      .verify(await sign('another-secret-another-secret-another'))
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(ApiError);
+    expect((err as ApiError).getStatus()).toBe(401);
   });
 });

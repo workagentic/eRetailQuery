@@ -6,6 +6,7 @@ import { fixtures } from './fixtures';
 const ORG_A = '11111111-1111-4111-8111-111111111111';
 const ORG_B = '22222222-2222-4222-8222-222222222222';
 const APPEND_ONLY = new Set(['audit_log']); // app_user has no UPDATE/DELETE grant by design
+const NO_DELETE = new Set(['orgs']); // app_user cannot DELETE (or INSERT) orgs: owner-only / SECURITY DEFINER
 
 let tdb: TestDatabase;
 let owner: Pool;
@@ -43,12 +44,18 @@ afterAll(async () => {
 
 it('every public table has RLS enabled and forced, a tenant column, and a fixture', async () => {
   const { rows } = await owner.query(`
-    select c.relname as name, c.relrowsecurity as rls, c.relforcerowsecurity as forced,
+    select c.relname as name, c.relkind as kind, c.relrowsecurity as rls, c.relforcerowsecurity as forced,
       exists (select 1 from pg_attribute a where a.attrelid = c.oid and a.attname = 'org_id' and not a.attisdropped) as has_org_id
     from pg_class c join pg_namespace n on n.oid = c.relnamespace
-    where n.nspname = 'public' and c.relkind = 'r'`);
+    where n.nspname = 'public' and c.relkind in ('r','p','v','m')`);
   const problems: string[] = [];
   for (const t of rows) {
+    if (t.kind === 'v' || t.kind === 'm') {
+      problems.push(
+        `${t.name}: views/materialized views bypass RLS: use security_invoker views or a summary table with RLS`,
+      );
+      continue;
+    }
     if (!t.has_org_id && t.name !== 'orgs') problems.push(`${t.name}: no org_id column`);
     if (!t.rls || !t.forced) problems.push(`${t.name}: RLS must be enabled and forced`);
     if (!(t.name in fixtures)) problems.push(`${t.name}: add a fixture in test/fixtures.ts`);
@@ -73,13 +80,39 @@ describe.each(Object.keys(fixtures))('tenant isolation: %s', (table) => {
       expect(
         (await c.query(`update ${table} set ${col} = ${col} where ${col} = $1`, [ORG_A])).rowCount,
       ).toBe(0);
-      expect((await c.query(`delete from ${table} where ${col} = $1`, [ORG_A])).rowCount).toBe(0);
+      if (NO_DELETE.has(table)) {
+        await expect(c.query(`delete from ${table} where ${col} = $1`, [ORG_A])).rejects.toThrow(
+          /permission denied/,
+        );
+      } else {
+        expect((await c.query(`delete from ${table} where ${col} = $1`, [ORG_A])).rowCount).toBe(0);
+      }
     });
   });
 
+  it.skipIf(APPEND_ONLY.has(table))(
+    'WITH CHECK: tenant A cannot move its row to tenant B',
+    async () => {
+      await expect(
+        asTenant(ORG_A, (c) =>
+          c.query(`update ${table} set ${col} = $1 where ${col} = $2`, [ORG_B, ORG_A]),
+        ),
+      ).rejects.toThrow(/row-level security|violates/);
+    },
+  );
+
+  it.skipIf(APPEND_ONLY.has(table))(
+    'positive control: tenant A can update its own rows',
+    async () => {
+      const res = await asTenant(ORG_A, (c) => c.query(`update ${table} set ${col} = ${col}`));
+      expect(res.rowCount).toBeGreaterThan(0);
+    },
+  );
+
   it('tenant B cannot insert a row for tenant A', async () => {
     await expect(asTenant(ORG_B, (c) => fixtures[table]!(c, ORG_A))).rejects.toThrow(
-      /row-level security/,
+      // orgs: app_user has no INSERT grant at all, so the grant check fires before RLS.
+      NO_DELETE.has(table) ? /permission denied|row-level security/ : /row-level security/,
     );
   });
 

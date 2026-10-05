@@ -43,6 +43,13 @@
       "when": 1791221843628,
       "tag": "0005_account_functions",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1791228209926,
+      "tag": "0006_security_hardening",
+      "breakpoints": true
     }
   ]
 }

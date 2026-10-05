@@ -19,7 +19,12 @@ export function createJoseVerifier(opts: {
   issuer: string;
   algorithms: string[];
 }): JwtVerifier {
-  const options = { issuer: opts.issuer, audience: 'authenticated', algorithms: opts.algorithms };
+  const options = {
+    issuer: opts.issuer,
+    audience: 'authenticated',
+    algorithms: opts.algorithms,
+    requiredClaims: ['exp', 'sub'],
+  };
   return {
     async verify(token) {
       try {
@@ -27,7 +32,12 @@ export function createJoseVerifier(opts: {
           typeof opts.key === 'function'
             ? await jwtVerify(token, opts.key, options)
             : await jwtVerify(token, opts.key, options);
-        if (!uuidSchema.safeParse(payload.sub).success || typeof payload.email !== 'string') {
+        if (
+          !uuidSchema.safeParse(payload.sub).success ||
+          typeof payload.email !== 'string' ||
+          payload.email.trim() === '' ||
+          payload.is_anonymous === true
+        ) {
           throw new Error('missing or invalid claims');
         }
         return { userId: payload.sub as string, email: payload.email.toLowerCase() };

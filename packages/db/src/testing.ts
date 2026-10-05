@@ -101,5 +101,6 @@ export async function startTestDatabase(): Promise<TestDatabase> {
   const mode = process.env.ERQ_TEST_DB ?? 'auto';
   if (mode === 'docker') return startDocker();
   if (mode === 'embedded') return startEmbedded();
+  if (mode !== 'auto') throw new Error('ERQ_TEST_DB must be docker, embedded or auto');
   return (await dockerAvailable()) ? startDocker() : startEmbedded();
 }

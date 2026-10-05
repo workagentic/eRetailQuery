@@ -106,7 +106,7 @@ export class OrgsService {
       role: input.role,
       expiresAt: expiresAt.toISOString(),
       acceptedAt: null,
-      acceptUrl: `${this.env.WEB_PUBLIC_URL}/invite/${token}`,
+      acceptUrl: `${this.env.WEB_PUBLIC_URL.replace(/\/+$/, '')}/invite/${token}`,
     };
   }
 

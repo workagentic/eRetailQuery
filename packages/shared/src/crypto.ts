@@ -29,9 +29,15 @@ export class EnvKeyProvider implements KeyProvider {
     const id = env.ENCRYPTION_KEY_ID;
     const key = env.ENCRYPTION_KEY;
     if (!id || !key) throw new Error('ENCRYPTION_KEY_ID and ENCRYPTION_KEY are required');
-    const retired = env.ENCRYPTION_OLD_KEYS
-      ? (JSON.parse(env.ENCRYPTION_OLD_KEYS) as Record<string, string>)
-      : {};
+    let retired: Record<string, string> = {};
+    if (env.ENCRYPTION_OLD_KEYS) {
+      try {
+        retired = JSON.parse(env.ENCRYPTION_OLD_KEYS) as Record<string, string>;
+      } catch {
+        // Deliberately drop the cause: a parse error can echo key material.
+        throw new Error('ENCRYPTION_OLD_KEYS must be a JSON object of keyId to base64 key');
+      }
+    }
     return new EnvKeyProvider(id, { ...retired, [id]: key });
   }
 
@@ -50,7 +56,7 @@ export class EnvKeyProvider implements KeyProvider {
 export function encrypt(plaintext: string, provider: KeyProvider, aad?: string): string {
   const { keyId, key } = provider.current();
   const iv = randomBytes(12);
-  const cipher = createCipheriv('aes-256-gcm', key, iv);
+  const cipher = createCipheriv('aes-256-gcm', key, iv, { authTagLength: 16 });
   if (aad !== undefined) cipher.setAAD(Buffer.from(aad));
   const ciphertext = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -63,13 +69,15 @@ export function decrypt(payload: string, provider: KeyProvider, aad?: string): s
   const parts = payload.split('.');
   if (parts.length !== 5 || parts[0] !== 'v1') throw new Error('malformed ciphertext');
   const [, keyId = '', iv = '', tag = '', ciphertext = ''] = parts;
-  const decipher = createDecipheriv(
-    'aes-256-gcm',
-    provider.get(keyId),
-    Buffer.from(iv, 'base64url'),
-  );
+  const key = provider.get(keyId);
+  const ivBuf = Buffer.from(iv, 'base64url');
+  const tagBuf = Buffer.from(tag, 'base64url');
+  if (ivBuf.length !== 12 || tagBuf.length !== 16) throw new Error('malformed ciphertext');
+  const decipher = createDecipheriv('aes-256-gcm', key, ivBuf, {
+    authTagLength: 16,
+  });
   if (aad !== undefined) decipher.setAAD(Buffer.from(aad));
-  decipher.setAuthTag(Buffer.from(tag, 'base64url'));
+  decipher.setAuthTag(tagBuf);
   return Buffer.concat([
     decipher.update(Buffer.from(ciphertext, 'base64url')),
     decipher.final(),

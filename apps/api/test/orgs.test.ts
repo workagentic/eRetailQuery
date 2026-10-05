@@ -66,7 +66,8 @@ describe('members and invites', () => {
     const res = await request(server())
       .get(`/orgs/${orgId}/members`)
       .set({ ...owner, 'x-org-id': randomUUID() });
-    expect([400, 403]).toContain(res.status);
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('org_mismatch');
   });
 
   it('full invite flow: create, list (no token), accept, then member', async () => {

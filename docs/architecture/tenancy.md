@@ -20,7 +20,7 @@ Child tables reference parents with `(org_id, id)` foreign keys (for example `sk
 
 ## SECURITY DEFINER functions
 
-Some operations happen before an org context exists. Migration `0005_account_functions.sql` defines three functions that run with the owner's rights, have `search_path` pinned to `public`, and have EXECUTE revoked from PUBLIC and granted to `app_user`:
+Some operations happen before an org context exists. Migration `0005_account_functions.sql` defines three functions that run with the owner's rights, have `search_path` pinned to `pg_catalog, public, pg_temp` (migration `0006_security_hardening.sql`), and have EXECUTE revoked from PUBLIC and granted to `app_user`:
 
 - `app_list_user_orgs(user_id)`: the orgs a user belongs to.
 - `app_create_org(user_id, name, slug)`: creates the org, owner membership, subscription and an audit row.
@@ -28,11 +28,13 @@ Some operations happen before an org context exists. Migration `0005_account_fun
 
 Trust model: the functions trust their arguments. `app_create_org` and `app_list_user_orgs` accept any user id, so the API must pass only the `sub` of a verified JWT, never a client-supplied id. `app_accept_invite` receives the email from the JWT `email` claim and compares it case-insensitively to the invite email. That makes **Supabase email confirmation mandatory in production**: with confirmation off, anyone could sign up with someone else's address and accept their invite. Local e2e disables confirmation in `supabase/config.toml` for convenience only.
 
+`pg_temp` must be last in the pinned `search_path`: when it is implicit or first, a session can create a temp table such as `invites` that shadows the real table inside a SECURITY DEFINER function. Migration 0006 also revokes EXECUTE on the two helper functions (`app_secure_tenant_table`, `app_set_updated_at`) from PUBLIC, and revokes all table and function privileges in `public` from the Supabase roles `anon` and `authenticated` (including their default privileges), since `REVOKE ... FROM PUBLIC` does not remove explicit grants.
+
 The migration role must be a superuser or have BYPASSRLS, because these functions write across RLS-protected tables. Supabase's `postgres` role qualifies.
 
 ## Audit log
 
-`audit_log` is append-only for `app_user`: UPDATE and DELETE are revoked, and tests assert it. Caveat: its `org_id` foreign key is `ON DELETE CASCADE`, so deleting an org (as the seed does, as `erq_owner`) also deletes that org's audit rows. Org deletion is therefore an owner-role operation outside normal traffic; if audit retention beyond org lifetime is required, change the FK before enabling org deletion in the product.
+`audit_log` is append-only for `app_user`: UPDATE and DELETE are revoked, and tests assert it. Caveat: its `org_id` foreign key is `ON DELETE CASCADE`, so deleting an org (as the seed does, as `erq_owner`) also deletes that org's audit rows. `app_user` can no longer INSERT or DELETE `orgs` either (migration 0006): orgs are created only through the SECURITY DEFINER `app_create_org`, and deleted only by the owner role, so the audit log cannot be wiped through the cascade. Org deletion is therefore an owner-role operation outside normal traffic; if audit retention beyond org lifetime is required, change the FK before enabling org deletion in the product.
 
 ## Invite tokens
 

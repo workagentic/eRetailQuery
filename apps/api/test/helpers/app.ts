@@ -16,6 +16,8 @@ export interface TokenOptions {
   aud?: string;
   expiresIn?: string;
   key?: KeyLike;
+  noExp?: boolean;
+  extraClaims?: Record<string, unknown>;
 }
 
 export interface TestApp {
@@ -51,18 +53,22 @@ export async function createTestApp(
       app,
       tdb,
       privateKey,
-      signToken: (o = {}) =>
-        new SignJWT({ email: o.email ?? 'owner@example.com' })
+      signToken: (o = {}) => {
+        const jwt = new SignJWT({ email: o.email ?? 'owner@example.com', ...o.extraClaims })
           .setProtectedHeader({ alg: 'ES256' })
           .setSubject(o.sub ?? randomUUID())
           .setIssuer(o.iss ?? ISSUER)
           .setAudience(o.aud ?? 'authenticated')
-          .setIssuedAt()
-          .setExpirationTime(o.expiresIn ?? '1h')
-          .sign(o.key ?? privateKey),
+          .setIssuedAt();
+        if (!o.noExp) jwt.setExpirationTime(o.expiresIn ?? '1h');
+        return jwt.sign(o.key ?? privateKey);
+      },
       close: async () => {
-        await app.close();
-        await tdb.stop();
+        try {
+          await app.close();
+        } finally {
+          await tdb.stop();
+        }
       },
     };
   } catch (err) {

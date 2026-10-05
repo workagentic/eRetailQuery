@@ -11,11 +11,19 @@ const SECRET_KEYS = [
   'credentials',
   'secret',
   'apiKey',
+  'api_key',
+  'accessToken',
+  'refreshToken',
+  'idToken',
+  'clientSecret',
+  'apiSecret',
+  'encryptedCredentials',
 ];
 
 export const REDACT_PATHS = [
   ...SECRET_KEYS,
   ...SECRET_KEYS.map((k) => `*.${k}`),
+  ...SECRET_KEYS.map((k) => `*.*.${k}`),
   'req.headers.authorization',
   'req.headers.cookie',
   '*.headers.authorization',

@@ -19,6 +19,14 @@ describe('createLogger', () => {
     }
     expect(out).toContain('[REDACTED]');
   });
+  it('redacts secrets two levels deep and the extended key set', () => {
+    const { lines, destination } = capture();
+    const log = createLogger({ destination });
+    log.info({ conn: { auth: { accessToken: 'SECRETX' } } }, 'deep');
+    log.info({ refreshToken: 'SECRETY', idToken: 'SECRETZ', clientSecret: 'SECRETW' }, 'flat');
+    const out = lines.join('');
+    for (const s of ['SECRETX', 'SECRETY', 'SECRETZ', 'SECRETW']) expect(out).not.toContain(s);
+  });
   it('keeps non-secret fields', () => {
     const { lines, destination } = capture();
     createLogger({ destination }).info({ orgId: 'abc' }, 'hello');

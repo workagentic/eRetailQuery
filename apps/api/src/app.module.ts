@@ -6,13 +6,14 @@ import { ConfigModule } from './config/config.module';
 import type { Env } from './config/env';
 import { DbModule } from './db/db.module';
 import { HealthController } from './health/health.controller';
+import { OrgsModule } from './orgs/orgs.module';
 
 @Module({})
 export class AppModule {
   static register(env: Env, extras: { controllers?: Type<unknown>[] } = {}): DynamicModule {
     return {
       module: AppModule,
-      imports: [ConfigModule.forRoot(env), DbModule.forRoot(), AuthModule],
+      imports: [ConfigModule.forRoot(env), DbModule.forRoot(), AuthModule, OrgsModule],
       controllers: [HealthController, ...(extras.controllers ?? [])],
       providers: [{ provide: APP_FILTER, useClass: ApiExceptionFilter }],
     };

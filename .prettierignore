@@ -1,0 +1,13 @@
+dist
+.next
+node_modules
+migrations
+pnpm-lock.yaml
+*.md
+docs
+supabase
+coverage
+playwright-report
+test-results
+.superpowers
+.turbo

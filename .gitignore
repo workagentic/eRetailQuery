@@ -1,2 +1,11 @@
 node_modules
 .superpowers
+dist
+.next
+.turbo
+.env
+coverage
+playwright-report
+test-results
+supabase/.temp
+*.tsbuildinfo

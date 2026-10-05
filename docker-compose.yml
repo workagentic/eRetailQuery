@@ -1,0 +1,14 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: erq_owner
+      POSTGRES_PASSWORD: erq_owner
+      POSTGRES_DB: erq
+    ports: ['54329:5432']
+    volumes: ['pgdata:/var/lib/postgresql/data']
+  redis:
+    image: redis:7-alpine
+    ports: ['6379:6379']
+volumes:
+  pgdata:

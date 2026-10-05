@@ -48,7 +48,12 @@ it('prices every SKU above its current landed cost, in integer cents', async () 
     [DEMO_ORG_ID],
   );
   expect(rows).toHaveLength(200);
-  expect(rows.every((r) => Number.isInteger(r.selling_price_cents) && r.selling_price_cents > r.landed)).toBe(true);
+  expect(
+    rows.every((r) => {
+      const price = Number(r.selling_price_cents);
+      return Number.isSafeInteger(price) && price > r.landed;
+    }),
+  ).toBe(true);
 });
 
 it('includes SKUs whose product cost changed over time (time-versioned)', async () => {

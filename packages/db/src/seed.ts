@@ -41,9 +41,24 @@ export async function seedDemoOrg(ownerUrl: string): Promise<void> {
       ]);
       await tx.insert(s.subscriptions).values({ orgId: DEMO_ORG_ID, plan: 'free' });
       await tx.insert(s.storeConnections).values([
-        { orgId: DEMO_ORG_ID, platform: 'shopify', externalAccountId: 'demo-shopify', status: 'demo' },
-        { orgId: DEMO_ORG_ID, platform: 'woocommerce', externalAccountId: 'demo-woo', status: 'demo' },
-        { orgId: DEMO_ORG_ID, platform: 'amazon', externalAccountId: 'demo-amazon', status: 'demo' },
+        {
+          orgId: DEMO_ORG_ID,
+          platform: 'shopify',
+          externalAccountId: 'demo-shopify',
+          status: 'demo',
+        },
+        {
+          orgId: DEMO_ORG_ID,
+          platform: 'woocommerce',
+          externalAccountId: 'demo-woo',
+          status: 'demo',
+        },
+        {
+          orgId: DEMO_ORG_ID,
+          platform: 'amazon',
+          externalAccountId: 'demo-amazon',
+          status: 'demo',
+        },
       ]);
 
       const productRows: (typeof s.products.$inferInsert)[] = [];
@@ -52,8 +67,11 @@ export async function seedDemoOrg(ownerUrl: string): Promise<void> {
       for (let p = 0; p < PRODUCT_COUNT; p++) {
         const productId = `00000000-0000-4000-8001-${String(p).padStart(12, '0')}`;
         productRows.push({
-          id: productId, orgId: DEMO_ORG_ID, title: `Demo Product ${p + 1}`,
-          brand: 'Demo Co', category: CATEGORIES[p % CATEGORIES.length],
+          id: productId,
+          orgId: DEMO_ORG_ID,
+          title: `Demo Product ${p + 1}`,
+          brand: 'Demo Co',
+          category: CATEGORIES[p % CATEGORIES.length],
         });
         const baseCost = 400 + Math.floor(rand() * 5600);
         VARIANTS.forEach((variant, v) => {
@@ -65,20 +83,55 @@ export async function seedDemoOrg(ownerUrl: string): Promise<void> {
           const landed = productCost + freight + packaging + duties;
           const price = Math.round((landed * (1.5 + rand() * 0.6)) / 100) * 100 - 1;
           skuRows.push({
-            id: skuId, orgId: DEMO_ORG_ID, productId, skuCode: `DEMO-${p + 1}-${v + 1}`,
+            id: skuId,
+            orgId: DEMO_ORG_ID,
+            productId,
+            skuCode: `DEMO-${p + 1}-${v + 1}`,
             sellingPriceCents: Math.max(price, landed + 1),
           });
           const base = { orgId: DEMO_ORG_ID, skuId, perUnit: true };
           if (rand() < 0.3) {
             // Supplier price increase: older cost closed out, newer cost open-ended.
-            costRows.push({ ...base, componentType: 'product_cost', amountCents: Math.round(productCost * 0.9), effectiveFrom: '2025-01-01', effectiveTo: '2025-07-01' });
-            costRows.push({ ...base, componentType: 'product_cost', amountCents: productCost, effectiveFrom: '2025-07-01' });
+            costRows.push({
+              ...base,
+              componentType: 'product_cost',
+              amountCents: Math.round(productCost * 0.9),
+              effectiveFrom: '2025-01-01',
+              effectiveTo: '2025-07-01',
+            });
+            costRows.push({
+              ...base,
+              componentType: 'product_cost',
+              amountCents: productCost,
+              effectiveFrom: '2025-07-01',
+            });
           } else {
-            costRows.push({ ...base, componentType: 'product_cost', amountCents: productCost, effectiveFrom: '2025-01-01' });
+            costRows.push({
+              ...base,
+              componentType: 'product_cost',
+              amountCents: productCost,
+              effectiveFrom: '2025-01-01',
+            });
           }
-          costRows.push({ ...base, componentType: 'inbound_freight', amountCents: freight, effectiveFrom: '2025-01-01' });
-          costRows.push({ ...base, componentType: 'packaging', amountCents: packaging, effectiveFrom: '2025-01-01' });
-          if (duties > 0) costRows.push({ ...base, componentType: 'duties_tariffs', amountCents: duties, effectiveFrom: '2025-01-01' });
+          costRows.push({
+            ...base,
+            componentType: 'inbound_freight',
+            amountCents: freight,
+            effectiveFrom: '2025-01-01',
+          });
+          costRows.push({
+            ...base,
+            componentType: 'packaging',
+            amountCents: packaging,
+            effectiveFrom: '2025-01-01',
+          });
+          if (duties > 0)
+            costRows.push({
+              ...base,
+              componentType: 'duties_tariffs',
+              amountCents: duties,
+              effectiveFrom: '2025-01-01',
+            });
         });
       }
       await tx.insert(s.products).values(productRows);

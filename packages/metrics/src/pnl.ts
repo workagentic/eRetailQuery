@@ -1,5 +1,5 @@
 import { add, money, subtract, sum, type Money } from '@erq/shared';
-import { moneyRatioBps, type Bps } from './bps';
+import { bigRatioToBps, moneyRatioBps, type Bps } from './bps';
 
 export interface PnlInput {
   currency: string;
@@ -135,4 +135,103 @@ export function buildPnl(input: PnlInput): Pnl {
     },
     input.cogs !== null,
   );
+}
+
+/** Adds P&Ls line by line, for breakdowns by channel, product, category or segment. */
+export function sumPnl(items: Pnl[], currency: string): Pnl {
+  const zero = money(0, currency);
+  const base: PnlBase = {
+    currency,
+    grossSales: zero,
+    discounts: zero,
+    refunds: zero,
+    cogs: zero,
+    shipping: zero,
+    pickPack: zero,
+    paymentFees: zero,
+    marketplaceFees: zero,
+    adSpendByPlatform: {},
+    otherOpex: zero,
+  };
+  let complete = true;
+  for (const p of items) {
+    if (p.currency !== currency)
+      throw new Error(`currency mismatch: P&L is ${p.currency}, expected ${currency}`);
+    base.grossSales = add(base.grossSales, p.grossSales);
+    base.discounts = add(base.discounts, p.discounts);
+    base.refunds = add(base.refunds, p.refunds);
+    base.cogs = add(base.cogs, p.cogs);
+    base.shipping = add(base.shipping, p.shipping);
+    base.pickPack = add(base.pickPack, p.pickPack);
+    base.paymentFees = add(base.paymentFees, p.paymentFees);
+    base.marketplaceFees = add(base.marketplaceFees, p.marketplaceFees);
+    base.otherOpex = add(base.otherOpex, p.otherOpex);
+    for (const [platform, spend] of Object.entries(p.adSpend.byPlatform)) {
+      base.adSpendByPlatform[platform] = add(base.adSpendByPlatform[platform] ?? zero, spend);
+    }
+    complete = complete && p.cogsComplete;
+  }
+  return assemble(base, complete);
+}
+
+export type PnlLineName =
+  | 'grossSales'
+  | 'discounts'
+  | 'refunds'
+  | 'netSales'
+  | 'cogs'
+  | 'grossProfit'
+  | 'fulfillment'
+  | 'paymentFees'
+  | 'marketplaceFees'
+  | 'contributionMargin'
+  | 'adSpend'
+  | 'netContributionAfterMarketing'
+  | 'otherOpex'
+  | 'estimatedOperatingProfit';
+
+export interface LineComparison {
+  current: Money;
+  previous: Money;
+  change: Money;
+  /** Change relative to the size of the previous value; null when the previous value is zero. */
+  changeBps: Bps | null;
+}
+export type PnlComparison = Record<PnlLineName, LineComparison>;
+
+const LINE_NAMES: PnlLineName[] = [
+  'grossSales',
+  'discounts',
+  'refunds',
+  'netSales',
+  'cogs',
+  'grossProfit',
+  'fulfillment',
+  'paymentFees',
+  'marketplaceFees',
+  'contributionMargin',
+  'adSpend',
+  'netContributionAfterMarketing',
+  'otherOpex',
+  'estimatedOperatingProfit',
+];
+
+function lineValue(p: Pnl, name: PnlLineName): Money {
+  return name === 'adSpend' ? p.adSpend.total : p[name];
+}
+
+export function comparePnl(current: Pnl, previous: Pnl): PnlComparison {
+  const result = {} as PnlComparison;
+  for (const name of LINE_NAMES) {
+    const cur = lineValue(current, name);
+    const prev = lineValue(previous, name);
+    const change = subtract(cur, prev);
+    result[name] = {
+      current: cur,
+      previous: prev,
+      change,
+      changeBps: bigRatioToBps(BigInt(change.cents), BigInt(Math.abs(prev.cents))),
+    };
+  }
+  return result;
 }

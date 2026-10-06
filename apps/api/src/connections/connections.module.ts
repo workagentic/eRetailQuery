@@ -9,6 +9,7 @@ import type { Env } from '../config/env';
 import { TENANT_DB } from '../db/db.module';
 import { ConnectionsController } from './connections.controller';
 import { ConnectionsService } from './connections.service';
+import { ShopifyPublicController } from './shopify-public.controller';
 import {
   CONNECTIONS_API,
   HTTP_CLIENT,
@@ -90,7 +91,7 @@ const providers: Provider[] = [
 ];
 
 @Module({
-  controllers: [ConnectionsController],
+  controllers: [ConnectionsController, ShopifyPublicController],
   providers,
   exports: [
     SHOPIFY_CONFIG,

@@ -1,8 +1,10 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import request from 'supertest';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { FakeShopify } from '@erq/connectors/testing';
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { decryptConnectionCredentials } from '@erq/connectors';
+import { FakeShopify, signOAuthQuery } from '@erq/connectors/testing';
+import { EnvKeyProvider } from '@erq/shared';
 import { HTTP_CLIENT } from '../src/connections/tokens';
 import { createTestApp, type TestApp } from './helpers/app';
 
@@ -196,5 +198,192 @@ describe('without Shopify configuration', () => {
     } finally {
       await bare.close();
     }
+  });
+});
+
+const WEB = 'http://localhost:3000';
+const callback = (q: Record<string, string>) =>
+  request(server()).get('/connections/shopify/callback').query(q).redirects(0);
+const nowTs = () => String(Math.floor(Date.now() / 1000));
+
+async function startInstall(
+  orgId: string,
+  h: Record<string, string>,
+  shop = 'new-shop.myshopify.com',
+) {
+  const res = await request(server())
+    .post(`/orgs/${orgId}/connections/shopify/install`)
+    .set(h)
+    .send({ shop });
+  return new URL(res.body.authorizeUrl).searchParams.get('state')!;
+}
+const signed = (state: string, over: Record<string, string> = {}) =>
+  signOAuthQuery(
+    {
+      code: 'good-code',
+      shop: 'new-shop.myshopify.com',
+      state,
+      timestamp: nowTs(),
+      ...over,
+    },
+    'test-secret',
+  );
+const resign = (q: Record<string, string>, over: Record<string, string>) =>
+  signOAuthQuery(
+    { code: q.code!, shop: q.shop!, state: q.state!, timestamp: nowTs(), ...over },
+    'test-secret',
+  );
+
+describe('GET /connections/shopify/callback', () => {
+  // Every test uses the same shop domain, so free it between tests (a shop can be active in one org only).
+  beforeEach(async () => {
+    await owner.query(
+      `update store_connections set status = 'disconnected' where external_account_id = 'new-shop.myshopify.com'`,
+    );
+  });
+  it('connects the store: encrypted token, active status, scopes, webhooks, audit, redirect', async () => {
+    const { orgId, user, h } = await createOrg('Callback Org');
+    const state = await startInstall(orgId, h);
+    const res = await callback(signed(state));
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`${WEB}/connections?shopify=connected`);
+    const { rows } = await owner.query(
+      `select id, status, scopes, encrypted_credentials, last_error from store_connections where org_id = $1`,
+      [orgId],
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ status: 'active', last_error: null });
+    expect(rows[0].scopes).toEqual(['read_orders', 'read_products']);
+    expect(rows[0].encrypted_credentials).not.toContain('shpat_');
+    const key = EnvKeyProvider.fromEnv({
+      ENCRYPTION_KEY_ID: 'k1',
+      ENCRYPTION_KEY: SHOPIFY_ENV.ENCRYPTION_KEY,
+    });
+    expect(decryptConnectionCredentials(rows[0].encrypted_credentials, key, rows[0].id)).toEqual({
+      accessToken: 'shpat_fake_token',
+    });
+    expect(() =>
+      decryptConnectionCredentials(rows[0].encrypted_credentials, key, randomUUID()),
+    ).toThrow(); // bound to this connection
+    expect(fake.subscriptions.get('orders/updated')).toBe('http://api.test/webhooks/shopify');
+    expect(
+      (
+        await owner.query(
+          `select actor_user_id, after_json from audit_log where org_id = $1 and action = 'connection.connected'`,
+          [orgId],
+        )
+      ).rows,
+    ).toEqual([
+      { actor_user_id: user, after_json: { platform: 'shopify', shop: 'new-shop.myshopify.com' } },
+    ]);
+  });
+  it('a reconnect updates the same row and resets an error state', async () => {
+    const { orgId, h } = await createOrg('Reconnect Org');
+    await callback(signed(await startInstall(orgId, h)));
+    await owner.query(
+      `update store_connections set status = 'error', last_error = 'x' where org_id = $1`,
+      [orgId],
+    );
+    const res = await callback(signed(await startInstall(orgId, h)));
+    expect(res.headers.location).toBe(`${WEB}/connections?shopify=connected`);
+    const { rows } = await owner.query(
+      `select status, last_error from store_connections where org_id = $1`,
+      [orgId],
+    );
+    expect(rows).toEqual([{ status: 'active', last_error: null }]);
+  });
+  it.each([
+    [
+      'a tampered signature',
+      (q: Record<string, string>) => ({ ...q, code: 'other' }),
+      'invalid_request',
+    ],
+    [
+      'an unsigned request',
+      (q: Record<string, string>) =>
+        Object.fromEntries(Object.entries(q).filter(([k]) => k !== 'hmac')),
+      'invalid_request',
+    ],
+    [
+      'an invalid shop',
+      (q: Record<string, string>) => resign(q, { shop: 'evil.com' }),
+      'invalid_request',
+    ],
+    [
+      'a stale timestamp',
+      (q: Record<string, string>) => resign(q, { timestamp: '1000' }),
+      'invalid_request',
+    ],
+    [
+      'a state that was never issued',
+      (q: Record<string, string>) => resign(q, { state: 'made-up' }),
+      'state_expired',
+    ],
+    [
+      'a state minted for another shop',
+      (q: Record<string, string>) => resign(q, { shop: 'other-shop.myshopify.com' }),
+      'shop_mismatch',
+    ],
+    [
+      'a rejected authorization code',
+      (q: Record<string, string>) => resign(q, { code: 'bad-code' }),
+      'exchange_failed',
+    ],
+  ])('rejects %s without creating a connection', async (_label, mutate, code) => {
+    const { orgId, h } = await createOrg(`Reject ${code} ${randomUUID().slice(0, 4)}`);
+    const state = await startInstall(orgId, h);
+    const res = await callback(mutate(signed(state)));
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toBe(`${WEB}/connections?shopify_error=${code}`);
+    expect(
+      (await owner.query(`select 1 from store_connections where org_id = $1`, [orgId])).rowCount,
+    ).toBe(0);
+  });
+  it('cannot be replayed and rejects an expired state', async () => {
+    const { orgId, h } = await createOrg('Replay Org');
+    const state = await startInstall(orgId, h);
+    expect((await callback(signed(state))).headers.location).toContain('shopify=connected');
+    expect((await callback(signed(state))).headers.location).toBe(
+      `${WEB}/connections?shopify_error=state_expired`,
+    );
+    const old = await startInstall(orgId, h);
+    await owner.query(
+      `update oauth_states set expires_at = now() - interval '1 minute' where org_id = $1`,
+      [orgId],
+    );
+    expect((await callback(signed(old))).headers.location).toBe(
+      `${WEB}/connections?shopify_error=state_expired`,
+    );
+  });
+  it('refuses a shop that is actively connected to a different org', async () => {
+    const one = await createOrg('Shop Owner One');
+    await callback(signed(await startInstall(one.orgId, one.h)));
+    const two = await createOrg('Shop Owner Two');
+    const res = await callback(signed(await startInstall(two.orgId, two.h)));
+    expect(res.headers.location).toBe(`${WEB}/connections?shopify_error=shop_in_use`);
+    expect(
+      (await owner.query(`select 1 from store_connections where org_id = $1`, [two.orgId]))
+        .rowCount,
+    ).toBe(0);
+  });
+  it('keeps the connection but warns when webhook registration fails', async () => {
+    const { orgId, h } = await createOrg('Warn Org');
+    const state = await startInstall(orgId, h);
+    // First scripted response answers the token exchange, the second fails the first webhook registration call.
+    fake.respondNext({
+      status: 200,
+      body: JSON.stringify({ access_token: 'shpat_x', scope: 'read_orders' }),
+    });
+    fake.failNext(500);
+    const res = await callback(signed(state));
+    expect(res.headers.location).toBe(`${WEB}/connections?shopify=connected&warning=webhooks`);
+    const { rows } = await owner.query(
+      `select status, last_error from store_connections where org_id = $1`,
+      [orgId],
+    );
+    expect(rows[0]).toMatchObject({
+      status: 'active',
+      last_error: 'Webhook setup failed. Reconnect to retry.',
+    });
   });
 });

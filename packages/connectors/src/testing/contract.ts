@@ -78,19 +78,33 @@ const cents = (v: unknown, label: string, min = 0) =>
   ).toBe(true);
 
 type Item = Record<string, unknown> & { externalId?: string };
-function validate(resource: SyncResource, item: Item): void {
-  const i = item as never as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- structural checks on untyped connector output
+const unique = (ids: unknown[], label: string) =>
+  expect(new Set(ids).size, `${label} must be unique`).toBe(ids.length);
+
+/** Throws on any violation of the normalized shape. Exported so tests can prove the rules bite. */
+export function validateNormalizedItem(resource: SyncResource, item: unknown): void {
+  expect(
+    item !== null && typeof item === 'object' && !Array.isArray(item),
+    'item must be an object',
+  ).toBe(true);
+  const i = item as Record<string, any>; // eslint-disable-line @typescript-eslint/no-explicit-any -- structural checks on untyped connector output
   if (resource === 'locations') {
     onlyKeys(i, KEYS.locations, 'location');
     nonEmpty(i.externalId, 'location.externalId');
     nonEmpty(i.name, 'location.name');
     expect(['warehouse', 'store', '3pl', 'fba', 'other']).toContain(i.type);
+    expect(typeof i.isActive).toBe('boolean');
   } else if (resource === 'products') {
     onlyKeys(i, KEYS.products, 'product');
     nonEmpty(i.externalId, 'product.externalId');
     nonEmpty(i.title, 'product.title');
     date(i.updatedAt, 'product.updatedAt');
     expect(['active', 'draft', 'archived']).toContain(i.status);
+    expect(Array.isArray(i.variants)).toBe(true);
+    unique(
+      i.variants.map((v: { externalId: string }) => v.externalId),
+      'variant ids in a product',
+    );
     for (const v of i.variants) {
       onlyKeys(v, KEYS.variant, 'variant');
       nonEmpty(v.externalId, 'variant.externalId');
@@ -117,19 +131,36 @@ function validate(resource: SyncResource, item: Item): void {
     expect(i.currency).toMatch(/^[A-Z]{3}$/);
     for (const k of ['grossCents', 'discountCents', 'shippingChargedCents', 'taxCents'])
       cents(i[k], `order.${k}`);
+    expect(Array.isArray(i.lines) && Array.isArray(i.refunds)).toBe(true);
+    unique(
+      i.lines.map((l: { externalLineId: string }) => l.externalLineId),
+      'line ids in an order',
+    );
+    unique(
+      i.refunds.map((r: { externalId: string }) => r.externalId),
+      'refund ids in an order',
+    );
     for (const l of i.lines) {
       onlyKeys(l, KEYS.line, 'order line');
       nonEmpty(l.externalLineId, 'line.externalLineId');
       cents(l.quantity, 'line.quantity', 1);
       cents(l.unitPriceCents, 'line.unitPriceCents');
+      expect(l.title === null || typeof l.title === 'string').toBe(true);
+      cents(l.discountCents, 'line.discountCents');
+      expect(l.discountCents).toBeLessThanOrEqual(l.quantity * l.unitPriceCents);
     }
     for (const r of i.refunds) {
       onlyKeys(r, KEYS.refund, 'refund');
       nonEmpty(r.externalId, 'refund.externalId');
       date(r.refundedAt, 'refund.refundedAt');
       cents(r.amountCents, 'refund.amountCents');
+      cents(r.shippingRefundCents, 'refund.shippingRefundCents');
+      expect(typeof r.restock).toBe('boolean');
+      expect(Array.isArray(r.lines)).toBe(true);
       for (const rl of r.lines) {
         onlyKeys(rl, KEYS.refundLine, 'refund line');
+        nonEmpty(rl.externalLineId, 'refundLine.externalLineId');
+        cents(rl.amountCents, 'refundLine.amountCents');
         cents(rl.quantity, 'refundLine.quantity', 1);
       }
     }
@@ -150,7 +181,7 @@ export function runConnectorContract(subject: ContractSubject): void {
           const page: Page<unknown> = await connector.fetchPage(ctx, resource, cursor, {});
           expect(Array.isArray(page.items)).toBe(true);
           for (const item of page.items as unknown as Item[]) {
-            validate(resource, item);
+            validateNormalizedItem(resource, item);
             const id =
               resource === 'inventory'
                 ? `${(item as { externalVariantId: string }).externalVariantId}@${(item as { locationExternalId: string }).locationExternalId}`

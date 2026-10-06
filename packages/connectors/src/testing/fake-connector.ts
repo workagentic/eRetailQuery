@@ -59,9 +59,10 @@ export class FakeConnector implements StoreConnector {
     const failure = this.failures.shift();
     if (failure) throw failure;
 
+    if (cursor !== null && !/^(0|[1-9]\d*)$/.test(cursor))
+      throw new PermanentError('invalid cursor');
     const start = cursor === null ? 0 : Number(cursor);
-    if (!Number.isSafeInteger(start) || start < 0)
-      throw new PermanentError(`invalid cursor ${cursor}`);
+    if (!Number.isSafeInteger(start)) throw new PermanentError('invalid cursor');
 
     let all = this.data[resource] as unknown as Array<{ updatedAt?: Date; placedAt?: Date }>;
     const { updatedSince, since } = options;

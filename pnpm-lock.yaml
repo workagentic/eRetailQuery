@@ -274,6 +274,31 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
 
+  packages/sync:
+    dependencies:
+      '@erq/connectors':
+        specifier: workspace:*
+        version: link:../connectors
+      '@erq/db':
+        specifier: workspace:*
+        version: link:../db
+      '@erq/metrics':
+        specifier: workspace:*
+        version: link:../metrics
+      '@erq/shared':
+        specifier: workspace:*
+        version: link:../shared
+      drizzle-orm:
+        specifier: ^0.45.3
+        version: 0.45.3(@types/pg@8.23.1)(pg@8.23.1)
+    devDependencies:
+      '@types/pg':
+        specifier: ^8.23.1
+        version: 8.23.1
+      pg:
+        specifier: ^8.23.1
+        version: 8.23.1
+
   packages/ui:
     dependencies:
       class-variance-authority:

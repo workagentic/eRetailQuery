@@ -133,6 +133,32 @@ describe('backfill of every resource', () => {
   });
 });
 
+describe('wider backfill after a completed run', () => {
+  it('is not filtered by the incremental watermark and imports the older rows', async () => {
+    const h = makeHarness(env);
+    await enqueueSync(h.deps, {
+      orgId: ORG_A,
+      connectionId: CONN_A,
+      resources: 'all',
+      mode: 'backfill',
+      since: new Date('2026-09-08T00:00:00Z'), // only the two newest orders
+    });
+    await drain(h);
+    expect((await counts()).orders).toBe(2);
+
+    h.clock.advance(3_600_000);
+    h.connector.calls.length = 0;
+    await backfillAll(h); // earlier since; the watermark from the first run is newer than every sample row
+    await drain(h);
+    expect((await counts()).orders).toBe(5);
+    expect(h.connector.calls.length).toBeGreaterThan(0);
+    for (const c of h.connector.calls) {
+      expect(c.options.updatedSince).toBeUndefined();
+      expect(c.options.since?.toISOString()).toBe(since.toISOString());
+    }
+  });
+});
+
 describe('crash recovery', () => {
   it('resumes from the stored cursor after a lost job, with no loss or duplication', async () => {
     const h = makeHarness(env);

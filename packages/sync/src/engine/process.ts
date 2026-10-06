@@ -121,7 +121,10 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
       { connectionId: connection.id, externalAccountId: connection.externalAccountId, credentials },
       job.resource,
       cursor.cursor,
-      { since: cursor.backfillSince ?? undefined, updatedSince: cursor.updatedSince ?? undefined },
+      // A backfill is bounded by `since` only; the incremental watermark applies to incremental runs alone.
+      cursor.backfillSince
+        ? { since: cursor.backfillSince }
+        : { updatedSince: cursor.updatedSince ?? undefined },
     );
   } catch (error) {
     if (error instanceof RateLimitedError) return { kind: 'delayed', delayMs: error.retryAfterMs };

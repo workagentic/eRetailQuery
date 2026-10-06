@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import { money } from '@erq/shared';
-import { DEFAULT_PRICING_CONFIG, landedCost, skuPricing, type CostComponent } from '../src/pricing';
+import {
+  DEFAULT_PRICING_CONFIG,
+  isCostInEffect,
+  landedCost,
+  skuPricing,
+  type CostComponent,
+} from '../src/pricing';
 
 const comp = (
   amountCents: number,
@@ -364,5 +370,24 @@ describe('skuPricing config and negative inputs', () => {
       skuPricing({ price: money(cents), landed: money(2000), fulfillment });
     expect(at(f).contribution.cents * 10000 >= 1500 * f).toBe(true);
     expect(at(f - 1).contribution.cents * 10000 >= 1500 * (f - 1)).toBe(false);
+  });
+});
+
+describe('isCostInEffect', () => {
+  const closed = { effectiveFrom: '2025-01-01', effectiveTo: '2025-07-01' };
+  it.each([
+    ['2024-12-31', false],
+    ['2025-01-01', true],
+    ['2025-06-30', true],
+    ['2025-07-01', false],
+    ['2026-01-01', false],
+  ])('closed period on %s is %s', (asOf, expected) => {
+    expect(isCostInEffect(closed, asOf)).toBe(expected);
+  });
+  it('is open-ended when effectiveTo is null', () => {
+    const open = { effectiveFrom: '2025-07-01', effectiveTo: null };
+    expect(isCostInEffect(open, '2025-06-30')).toBe(false);
+    expect(isCostInEffect(open, '2025-07-01')).toBe(true);
+    expect(isCostInEffect(open, '2099-01-01')).toBe(true);
   });
 });

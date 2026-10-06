@@ -12,6 +12,7 @@ describe('@erq/metrics public API', () => {
     'ratioToBps',
     'moneyRatioBps',
     'formatBps',
+    'isCostInEffect',
     'landedCost',
     'skuPricing',
     'roas',

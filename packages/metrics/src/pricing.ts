@@ -43,6 +43,17 @@ export const DEFAULT_PRICING_CONFIG: Readonly<PricingConfig> = Object.freeze({
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** A cost component is in effect on `asOf` when effectiveFrom <= asOf < effectiveTo (effectiveTo null = open-ended). */
+export function isCostInEffect(
+  component: Pick<CostComponent, 'effectiveFrom' | 'effectiveTo'>,
+  asOf: string,
+): boolean {
+  return (
+    component.effectiveFrom <= asOf &&
+    (component.effectiveTo === null || asOf < component.effectiveTo)
+  );
+}
+
 /** Per-unit landed cost in effect on `asOf`. Per-batch costs must be converted to per-unit by the caller. */
 export function landedCost(components: CostComponent[], asOf: string, currency = 'USD'): Money {
   if (!ISO_DATE.test(asOf)) throw new RangeError(`asOf must be YYYY-MM-DD, got ${asOf}`);
@@ -63,7 +74,7 @@ export function landedCost(components: CostComponent[], asOf: string, currency =
     }
     if (c.currency !== currency) throw new Error(`currency mismatch: ${c.currency} vs ${currency}`);
     const amount = money(c.amountCents, c.currency);
-    if (c.effectiveFrom <= asOf && (c.effectiveTo === null || asOf < c.effectiveTo)) {
+    if (isCostInEffect(c, asOf)) {
       total = add(total, amount);
     }
   }

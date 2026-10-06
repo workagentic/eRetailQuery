@@ -28,6 +28,7 @@
     "test": "tsup && vitest run"
   },
   "dependencies": {
-    "@erq/shared": "workspace:*"
+    "@erq/shared": "workspace:*",
+    "zod": "^3.25.76"
   }
 }

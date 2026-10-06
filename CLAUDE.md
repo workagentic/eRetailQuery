@@ -477,7 +477,15 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 **Not yet verified by running:** the Redis rate limiter, the BullMQ sync queue and the sync worker (no Redis or Docker in dev), the BullMQ system-worker test, the Playwright e2e, live Supabase login and middleware flows, the seed CLI, and the CI workflow. The first CI run with Docker is their first execution. Also unverified (1b-2): everything against real Shopify, the BullMQ webhook queue, worker and sweep, and the Playwright connect test.
 
-**Known open items:** the embedded Postgres test helper kills its process tree on stop, exit and signals, but POSIX paths are unverified and an orphan `io_worker` child was seen once after a single-file run on Windows; check for leftover `postgres` processes and `%TEMP%\erq-pg-*` after test runs. Shopify token refresh (expiring offline tokens) is deferred to 1b-3, and `shop_in_use` is a check-then-act without a unique index.
+**Known open items (hard gates first, details in docs/shopify-connection.md section 8):**
+- GATE before any real Shopify app or merchant is connected: the OAuth state is bound to org, user and shop but not to the browser completing the callback, so an org admin could get a victim to complete an authorize URL for the victim's shop and connect it to the admin's org. Fix: route the callback through the web app to an authenticated API endpoint that requires `jwt.sub === consumed.userId` and a current admin/owner role on `consumed.orgId`, or bind an HttpOnly SameSite=Lax nonce cookie at install.
+- GATE before 1b-3 ingests orders: `shop/redact` purges only the one connection `app_find_store_connection` returns; it must purge every disconnected connection of that platform and shop across orgs (new migration `app_purge_shop(platform, shop)` with one audit row per org, plus the `oauth_states` platform filter and a `(status, updated_at)` partial index on `webhook_events`).
+- `shop_in_use` is check-then-act; a partial unique index on `(platform, external_account_id) WHERE status <> 'disconnected'` is planned with the OAuth fix.
+- The OAuth query HMAC is computed over Express's decoded values while Shopify signs the raw query string; verify on the first real install and consider HMAC over the raw query from `req.originalUrl`.
+- Webhook events that end `failed` after 5 BullMQ attempts are never swept (privacy topics included): sweep or alert before 1b-3.
+- The API and worker share `app_user`, which can execute `app_purge_store_connection`; consider a separate worker role.
+- Shopify token refresh (expiring offline tokens) is deferred to 1b-3.
+- Embedded Postgres test cleanup: the orphan `io_worker` leak was caused by `taskkill /T` killing children while the postmaster lived (crash recovery respawned them); fixed by killing the postmaster alone first, then its children by parent pid. Verified on Windows (three full `@erq/db` runs and three single-file runs with zero leftover processes); POSIX paths remain unverified until CI.
 
 **Known deferred items:** global deny-by-default guard, `money(-0)` handling and extra money tests (Phase 1a), Swagger gating in production, worker shutdown robustness, UX polish on the web pages, and the seed slug `demo` colliding with a real org named "Demo".
 

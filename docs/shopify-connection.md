@@ -124,6 +124,18 @@ Held: connection metadata (shop domain, scopes, status, errors), encrypted token
 
 ## 8. Known gaps
 
+### Hard gates
+
+- **GATE before any real Shopify app or merchant is connected (OAuth callback not bound to the browser).** The OAuth state is bound to org, user and shop but not to the browser that completes the callback. An org admin could mint an authorize URL for a victim's shop and get the victim to complete it, connecting the victim's shop to the attacker's org (blocked only while the victim's own org has a non-disconnected connection). Planned fix: route the callback through the web app (a Next route handler with the Supabase session) to an authenticated API endpoint that requires `jwt.sub === consumed.userId` and a current admin or owner role on `consumed.orgId`; or set an HttpOnly SameSite=Lax nonce cookie at install and require it in the callback.
+- **GATE before 1b-3 ingests orders (`shop/redact` covers one connection).** `shop/redact` purges only the connection returned by `app_find_store_connection` (one row). A shop reconnected from another org can leave a disconnected connection in org A and another in org B, so the purge must cover every disconnected connection of that platform and shop across orgs: a new migration `app_purge_shop(platform, shop)` with one audit row per org, folding in an `oauth_states` platform filter and a `(status, updated_at)` partial index on `webhook_events`.
+
+### Other open items
+
+- `shop_in_use` is check-then-act (see below); a partial unique index on `(platform, external_account_id) WHERE status <> 'disconnected'` is planned together with the OAuth callback fix.
+- **OAuth query HMAC over decoded values.** The HMAC is computed over Express's decoded query values, while Shopify signs the raw encoded query string. This matters for values such as `host` that can contain `=`. Verify on the first real install and consider computing the HMAC over the raw query taken from `req.originalUrl`.
+- **Failed events are never swept.** Events that end `failed` after 5 BullMQ attempts are not picked up by the sweep, including privacy topics. Sweep or alert on them before 1b-3.
+- **Shared database role.** The API and the worker share the `app_user` role, which can execute `app_purge_store_connection`. Consider a separate worker role later.
+
 - **Nothing has run against real Shopify.** All behaviour is verified against `fake-shopify` and `signing` test helpers only.
 - **Expiring offline tokens (refresh deferred to 1b-3).** Shopify can issue expiring offline access tokens plus a refresh token to new public apps (the `expiring=1` flow). 1b-2 stores only `{ accessToken }`, does not request expiring tokens and has no refresh. If Shopify issues an expiring token anyway, syncs will fail with an auth error after expiry until refresh exists.
 - **Webhook subscription GraphQL not verified.** The `webhookSubscriptionCreate` mutation (`URL!` variable type, `format: JSON`, topic enum names derived as `ORDERS_CREATE` and so on) was not independently verified against the live docs. Check it against a real shop in 1b-3.
@@ -132,4 +144,4 @@ Held: connection metadata (shop domain, scopes, status, errors), encrypted token
 - No reconnect reminder emails.
 - The Redis queue, worker and sweep tests are skipped without Docker and are unverified until CI. The web page's pure helpers are unit-tested; the Playwright test only covers the guided empty page and error-text safety, not a real connect, and phone-width layout is unchecked.
 - API version is pinned in `SHOPIFY_API_VERSION` (`packages/connectors/src/shopify/config.ts`).
-- Embedded Postgres test cleanup: `startTestDatabase()` in embedded mode kills the process tree and removes the directory on stop, process exit and SIGINT/SIGTERM. POSIX paths are unverified on the Windows dev machine (CI is their first run), and an orphan `io_worker` was observed once after a single-file run on Windows.
+- Embedded Postgres test cleanup: `startTestDatabase()` in embedded mode stops the server and removes the directory on stop, process exit and SIGINT/SIGTERM. The orphan `io_worker` processes seen on Windows came from `taskkill /T` killing children while the postmaster was alive: it entered crash recovery and respawned auxiliary processes outside taskkill's snapshot. The helper now kills the postmaster alone first, waits for it, then kills its `postgres.exe` children by parent pid (created after the server's start, so a reused pid is never hit), with a data-directory sweep as a fallback; every external command has a 20 s timeout, and the cleanup test re-queries descendants after the stop. Verified on Windows with three full `@erq/db` runs and three single-file runs, zero leftover processes each time. The POSIX paths (SIGQUIT, which makes the postmaster kill its own children) remain unverified until CI.

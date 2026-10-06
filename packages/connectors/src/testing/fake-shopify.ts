@@ -27,6 +27,13 @@ export class FakeShopify implements HttpClient {
     this.codes = opts.codes ?? new Set(['good-code']);
   }
 
+  /** Forgets scripted responses, recorded requests and subscriptions (use in beforeEach). */
+  reset(): void {
+    this.scripted.length = 0;
+    this.requests.length = 0;
+    this.subscriptions.clear();
+  }
+
   /** The next request answers with this status and an empty JSON body. */
   failNext(status: number, headers: Record<string, string> = {}): void {
     this.scripted.push({ status, headers, body: '{}' });

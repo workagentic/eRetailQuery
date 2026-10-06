@@ -4,6 +4,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { decryptConnectionCredentials } from '@erq/connectors';
 import { FakeShopify, signOAuthQuery } from '@erq/connectors/testing';
+import { hashOAuthNonce } from '@erq/db';
 import { EnvKeyProvider } from '@erq/shared';
 import { HTTP_CLIENT } from '../src/connections/tokens';
 import { createTestApp, type TestApp } from './helpers/app';
@@ -75,16 +76,40 @@ describe('POST /orgs/:orgId/connections/shopify/install', () => {
     expect(rows).toHaveLength(1);
     expect(rows[0].shop).toBe('my-store.myshopify.com');
     expect(rows[0].nonce_hash).not.toBe(nonce); // only the hash is stored
+    expect(rows[0].nonce_hash).toBe(hashOAuthNonce(nonce));
+  });
+  it("lazily deletes the org's expired states when a new install starts", async () => {
+    const { orgId, h } = await createOrg('Lazy Cleanup Org');
+    await owner.query(
+      `insert into oauth_states (org_id, user_id, platform, shop, nonce_hash, expires_at)
+       values ($1, gen_random_uuid(), 'shopify', 'old.myshopify.com', 'expired-hash', now() - interval '1 minute')`,
+      [orgId],
+    );
+    const res = await request(server())
+      .post(`/orgs/${orgId}/connections/shopify/install`)
+      .set(h)
+      .send({ shop: 'fresh.myshopify.com' });
+    expect(res.status).toBe(201);
+    const { rows } = await owner.query(`select shop from oauth_states where org_id = $1`, [orgId]);
+    expect(rows).toEqual([{ shop: 'fresh.myshopify.com' }]);
   });
   it('rejects invalid shops, and viewers, analysts and anonymous callers', async () => {
     const { orgId, h } = await createOrg('Guarded Org');
-    for (const shop of ['evil.com', 'a.myshopify.com.evil.com', 'https://a.myshopify.com', '']) {
+    for (const shop of ['evil.com', 'a.myshopify.com.evil.com', 'https://a.myshopify.com']) {
       const res = await request(server())
         .post(`/orgs/${orgId}/connections/shopify/install`)
         .set(h)
         .send({ shop });
       expect(res.status, shop).toBe(400);
+      expect(res.body.error.code, shop).toBe('invalid_shop');
     }
+    // The empty string never reaches the service: the body schema (min length) rejects it first.
+    const empty = await request(server())
+      .post(`/orgs/${orgId}/connections/shopify/install`)
+      .set(h)
+      .send({ shop: '' });
+    expect(empty.status).toBe(400);
+    expect(empty.body.error.code).toBe('validation_failed');
     for (const role of ['viewer', 'analyst'] as const) {
       const member = await addMember(orgId, role);
       const res = await request(server())
@@ -133,6 +158,11 @@ describe('GET /orgs/:orgId/connections and disconnect', () => {
       (await request(server()).post(`/orgs/${orgId}/connections/${id}/disconnect`).set(viewer))
         .status,
     ).toBe(403);
+    const analyst = await addMember(orgId, 'analyst');
+    expect(
+      (await request(server()).post(`/orgs/${orgId}/connections/${id}/disconnect`).set(analyst))
+        .status,
+    ).toBe(403);
     const res = await request(server()).post(`/orgs/${orgId}/connections/${id}/disconnect`).set(h);
     expect(res.status).toBe(201);
     expect(res.body).toEqual({ ok: true });
@@ -158,6 +188,23 @@ describe('GET /orgs/:orgId/connections and disconnect', () => {
         .status,
     ).toBe(400);
   });
+  it('lists connections created at the same instant in a stable order (id tiebreaker)', async () => {
+    const { orgId, h } = await createOrg('Tie Org');
+    const ids = [
+      'ffffffff-ffff-4fff-8fff-ffffffffffff',
+      '00000000-0000-4000-8000-000000000001',
+      '88888888-8888-4888-8888-888888888888',
+    ];
+    for (const [i, id] of ids.entries()) {
+      await owner.query(
+        `insert into store_connections (id, org_id, platform, external_account_id, status, created_at)
+         values ($1, $2, 'shopify', $3, 'active', '2026-01-01T00:00:00Z')`,
+        [id, orgId, `tie-${i}.myshopify.com`],
+      );
+    }
+    const list = await request(server()).get(`/orgs/${orgId}/connections`).set(h);
+    expect(list.body.map((c: { id: string }) => c.id)).toEqual([...ids].sort());
+  });
   it("never shows or touches another org's connections", async () => {
     const a = await createOrg('Org One');
     const b = await createOrg('Org Two');
@@ -174,6 +221,38 @@ describe('GET /orgs/:orgId/connections and disconnect', () => {
       ).status,
     ).toBe(404);
     expect((await request(server()).get(`/orgs/${a.orgId}/connections`).set(b.h)).status).toBe(400); // header/url mismatch
+  });
+});
+
+describe('with Shopify configured but no encryption key', () => {
+  it('refuses install with 503 before the merchant consents, and the callback says not_configured', async () => {
+    const noKey: Record<string, string> = { ...SHOPIFY_ENV };
+    delete noKey.ENCRYPTION_KEY_ID;
+    delete noKey.ENCRYPTION_KEY;
+    const keyless = await createTestApp({ env: noKey });
+    try {
+      const user = randomUUID();
+      const auth = { authorization: `Bearer ${await keyless.signToken({ sub: user })}` };
+      const org = await request(keyless.app.getHttpServer())
+        .post('/orgs')
+        .set(auth)
+        .send({ name: 'Keyless Org' });
+      const orgId = org.body.orgId as string;
+      const res = await request(keyless.app.getHttpServer())
+        .post(`/orgs/${orgId}/connections/shopify/install`)
+        .set({ ...auth, 'x-org-id': orgId })
+        .send({ shop: 'a.myshopify.com' });
+      expect(res.status).toBe(503);
+      expect(res.body.error.code).toBe('shopify_not_configured');
+      const cb = await request(keyless.app.getHttpServer())
+        .get('/connections/shopify/callback')
+        .query(signed('any-state', { shop: 'a.myshopify.com' }))
+        .redirects(0);
+      expect(cb.status).toBe(302);
+      expect(cb.headers.location).toBe(`${WEB}/connections?shopify_error=not_configured`);
+    } finally {
+      await keyless.close();
+    }
   });
 });
 
@@ -195,6 +274,12 @@ describe('without Shopify configuration', () => {
       expect(res.status).toBe(503);
       expect(res.body.error.code).toBe('shopify_not_configured');
       expect((await request(bare.app.getHttpServer()).get('/health')).status).toBe(200);
+      const cb = await request(bare.app.getHttpServer())
+        .get('/connections/shopify/callback')
+        .query(signed('any-state'))
+        .redirects(0);
+      expect(cb.status).toBe(302);
+      expect(cb.headers.location).toBe(`${WEB}/connections?shopify_error=not_configured`);
     } finally {
       await bare.close();
     }
@@ -237,6 +322,7 @@ const resign = (q: Record<string, string>, over: Record<string, string>) =>
 describe('GET /connections/shopify/callback', () => {
   // Every test uses the same shop domain, so free it between tests (a shop can be active in one org only).
   beforeEach(async () => {
+    fake.reset(); // no scripted response or subscription leaks from one test into the next
     await owner.query(
       `update store_connections set status = 'disconnected' where external_account_id = 'new-shop.myshopify.com'`,
     );
@@ -282,6 +368,7 @@ describe('GET /connections/shopify/callback', () => {
   it('a reconnect updates the same row and resets an error state', async () => {
     const { orgId, h } = await createOrg('Reconnect Org');
     await callback(signed(await startInstall(orgId, h)));
+    const first = await owner.query(`select id from store_connections where org_id = $1`, [orgId]);
     await owner.query(
       `update store_connections set status = 'error', last_error = 'x' where org_id = $1`,
       [orgId],
@@ -289,10 +376,10 @@ describe('GET /connections/shopify/callback', () => {
     const res = await callback(signed(await startInstall(orgId, h)));
     expect(res.headers.location).toBe(`${WEB}/connections?shopify=connected`);
     const { rows } = await owner.query(
-      `select status, last_error from store_connections where org_id = $1`,
+      `select id, status, last_error from store_connections where org_id = $1`,
       [orgId],
     );
-    expect(rows).toEqual([{ status: 'active', last_error: null }]);
+    expect(rows).toEqual([{ id: first.rows[0].id, status: 'active', last_error: null }]);
   });
   it.each([
     [
@@ -356,6 +443,19 @@ describe('GET /connections/shopify/callback', () => {
     expect((await callback(signed(old))).headers.location).toBe(
       `${WEB}/connections?shopify_error=state_expired`,
     );
+  });
+  it('consumes the state even when the shop does not match', async () => {
+    const { orgId, h } = await createOrg('Mismatch Org');
+    const state = await startInstall(orgId, h);
+    expect(
+      (await callback(signed(state, { shop: 'other-shop.myshopify.com' }))).headers.location,
+    ).toBe(`${WEB}/connections?shopify_error=shop_mismatch`);
+    expect((await callback(signed(state))).headers.location).toBe(
+      `${WEB}/connections?shopify_error=state_expired`,
+    );
+    expect(
+      (await owner.query(`select 1 from store_connections where org_id = $1`, [orgId])).rowCount,
+    ).toBe(0);
   });
   it('refuses a shop that is actively connected to a different org', async () => {
     const one = await createOrg('Shop Owner One');

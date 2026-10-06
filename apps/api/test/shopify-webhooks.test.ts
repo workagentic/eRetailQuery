@@ -181,7 +181,10 @@ describe('POST /webhooks/shopify', () => {
   it('rejects a signed but non-JSON body with 400 and stores nothing', async () => {
     const body = 'not json';
     const before = (await events()).length;
-    expect((await post(body, hdr(body))).status).toBe(400);
+    const res = await post(body, hdr(body));
+    expect(res.status).toBe(400);
+    // body-parser rejects it before the receiver runs, so this is the filter's code, not invalid_payload
+    expect(res.body).toEqual({ error: { code: 'bad_request', message: expect.any(String) } });
     expect((await events()).length).toBe(before);
   });
   it('rejects a repeated hmac header', async () => {
@@ -215,6 +218,7 @@ describe('POST /webhooks/shopify', () => {
       .set('content-type', 'application/json')
       .send(JSON.stringify({ name: 'x'.repeat(200_000) }));
     expect(res.status).toBe(413);
+    expect(res.body.error.code).toBe('payload_too_large');
   });
 });
 

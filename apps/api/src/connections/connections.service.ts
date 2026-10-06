@@ -184,6 +184,10 @@ export class ConnectionsService {
 
   async startInstall(orgId: string, userId: string, input: string): Promise<InstallResponse> {
     const cfg = this.requireConfig();
+    // Without a key the callback cannot store the token: refuse before the merchant consents on Shopify.
+    if (!this.keyProvider) {
+      throw new ApiError(503, 'shopify_not_configured', 'Shopify is not configured on this server');
+    }
     const shop = normalizeShopInput(input);
     if (!isValidShopDomain(shop)) {
       throw new ApiError(
@@ -217,7 +221,10 @@ export class ConnectionsService {
 
   list(orgId: string): Promise<ConnectionDto[]> {
     return this.db.withTenant(orgId, async (tx) => {
-      const rows = await tx.select().from(storeConnections).orderBy(storeConnections.createdAt);
+      const rows = await tx
+        .select()
+        .from(storeConnections)
+        .orderBy(storeConnections.createdAt, storeConnections.id);
       return rows.map((r) => ({
         id: r.id,
         platform: r.platform,

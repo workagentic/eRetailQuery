@@ -265,7 +265,9 @@ describe('GET /connections/shopify/callback', () => {
     expect(() =>
       decryptConnectionCredentials(rows[0].encrypted_credentials, key, randomUUID()),
     ).toThrow(); // bound to this connection
-    expect(fake.subscriptions.get('orders/updated')).toBe('http://api.test/webhooks/shopify');
+    // 1b-2 subscribes to the uninstall only: no customer-data topics before 1b-3.
+    expect(fake.subscriptions.get('app/uninstalled')).toBe('http://api.test/webhooks/shopify');
+    expect([...fake.subscriptions.keys()]).toEqual(['app/uninstalled']);
     expect(
       (
         await owner.query(

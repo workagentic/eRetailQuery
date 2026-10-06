@@ -94,7 +94,7 @@ describe('processWebhookEvent', () => {
         .status,
     ).toBe('active');
   });
-  it('defers data topics for 1b-3 and ignores unknown topics', async () => {
+  it('defers data topics for 1b-3 without keeping their payload, and ignores unknown topics', async () => {
     for (const topic of [
       'orders/create',
       'orders/updated',
@@ -110,6 +110,11 @@ describe('processWebhookEvent', () => {
         'deferred',
       );
       expect((await status(id)).status).toBe('deferred');
+      expect(
+        (await owner.query(`select payload from webhook_events where id = $1`, [id])).rows[0]
+          .payload,
+        topic,
+      ).toEqual({});
     }
     const id = await addEvent('themes/publish');
     expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: id })).toBe('ignored');

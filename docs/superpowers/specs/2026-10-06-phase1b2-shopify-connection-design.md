@@ -14,6 +14,7 @@ Decisions made with the owner (2026-10-06):
 - No Shopify Partner app or dev store exists yet. Everything is built to Shopify's documented contracts and verified with fixtures and a fake Shopify behind an injected HTTP client. Live verification happens later.
 - Scope includes the API and one minimal "Connect Shopify" card with a status row in the web app. The onboarding wizard and a full connections settings page are later work.
 - Webhooks are verified, stored (deduplicated), acknowledged immediately, and processed by a worker job. 1b-2 acts on `app/uninstalled` and the privacy topics only. Order, product and inventory topics are stored for 1b-3.
+  - *Amendment (2026-10-07, final review):* 1b-2 subscribes each shop to `app/uninstalled` only. Order, refund, product and inventory topics carry customer data and likely need protected customer data approval, so their subscriptions move to 1b-3 together with their consumption. A data-topic event that arrives anyway is marked `deferred` and its stored payload is replaced with `{}`.
 
 Out of scope: any data fetching, any live Shopify call, CSV import, cost entry, onboarding wizard, billing, customers table, other platforms.
 

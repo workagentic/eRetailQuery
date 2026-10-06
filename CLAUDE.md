@@ -514,6 +514,7 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - 2026-10-07: The Shopify connection is built against fakes until a Partner app exists; nothing has run against real Shopify.
 - 2026-10-07: Webhooks are verified, stored, deduplicated and acknowledged fast, then processed by the worker.
 - 2026-10-07: Data-topic webhook events (orders, refunds, products, inventory) are stored with status `deferred` for 1b-3.
+- 2026-10-07: Final review: 1b-2 subscribes shops to `app/uninstalled` only. Data-topic subscriptions (orders, refunds, products, inventory) move to 1b-3 together with their consumption and Shopify's protected customer data approval, because their payloads carry customer data and an unapproved subscription would fail on real shops. A data-topic event that arrives anyway is deferred with its payload emptied to `{}`.
 - 2026-10-07: `shop/redact` purges the connection's data through the SECURITY DEFINER function `app_purge_store_connection`; the org's catalog and costs are kept.
 - 2026-10-07: A shop can be actively connected to only one org (check-then-act in the callback, no unique index yet).
 - 2026-10-07: Only the read-only scopes 1b-3 needs are requested (`read_products`, `read_inventory`, `read_locations`, `read_orders`); protected customer data is not requested.

@@ -16,7 +16,7 @@ Callback (public route)
        -> shop must equal the shop bound to the state -> shop_in_use check
        -> exchange code for token (form-urlencoded POST, no db transaction open)
        -> withTenant(orgId): upsert store_connections (active), store encrypted token, audit row
-       -> register webhook subscriptions (GraphQL) -> 302 to ${WEB_PUBLIC_URL}/connections?shopify=connected
+       -> register the app/uninstalled subscription (GraphQL) -> 302 to ${WEB_PUBLIC_URL}/connections?shopify=connected
           (or ?shopify=connected&warning=webhooks, or ?shopify_error=<code>)
 
 Webhook (public route)
@@ -37,10 +37,10 @@ Create an app in the Shopify Partner organisation (Dev Dashboard) and put these 
 | App client id | `SHOPIFY_API_KEY` |
 | App client secret | `SHOPIFY_API_SECRET` |
 | Allowed redirection URL `${API_PUBLIC_URL}/connections/shopify/callback` | App configuration (Dev Dashboard or `shopify.app.toml`). It must exactly match, because `redirectUri` is built from `API_PUBLIC_URL` with trailing slashes removed. |
-| Compliance webhooks `customers/data_request`, `customers/redact`, `shop/redact` with URI `${API_PUBLIC_URL}/webhooks/shopify` | App configuration (`[[webhooks.subscriptions]]` with `compliance_topics` in `shopify.app.toml`). The same endpoint also receives the per-shop data subscriptions the callback registers. |
+| Compliance webhooks `customers/data_request`, `customers/redact`, `shop/redact` with URI `${API_PUBLIC_URL}/webhooks/shopify` | App configuration (`[[webhooks.subscriptions]]` with `compliance_topics` in `shopify.app.toml`). The same endpoint also receives the per-shop `app/uninstalled` subscription the callback registers. |
 | Scopes | App configuration must include the scopes in `SHOPIFY_SCOPES` (default `read_products,read_inventory,read_locations,read_orders`, comma separated). |
 
-Protected customer data access is a separate approval in the Partner dashboard and is **not** requested in 1b-2: no customer scopes are asked for and no customer PII is stored.
+Protected customer data access is a separate approval in the Partner dashboard and is **not** requested in 1b-2: no customer scopes are asked for and no customer PII is stored. For the same reason 1b-2 subscribes each shop to `app/uninstalled` only (`SHOPIFY_WEBHOOK_TOPICS`); the order, refund, product and stock topics (`SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS`) carry customer data, likely need that approval, and are subscribed in 1b-3 together with their consumption.
 
 The endpoint must use HTTPS with a valid certificate and answer 401 on a bad HMAC (it does).
 
@@ -101,12 +101,12 @@ Token exchange: the request to `https://<shop>/admin/oauth/access_token` is sent
 - **Verification:** base64 HMAC-SHA256 of the raw bytes with the app secret, constant-time compare, malformed or missing header rejected. A verified request additionally needs valid `X-Shopify-Topic`, `X-Shopify-Webhook-Id` and a valid `X-Shopify-Shop-Domain`; otherwise 401.
 - **Dedupe key:** `(org_id, store_connection_id, external_event_id)` where `external_event_id` is `X-Shopify-Webhook-Id`. A second delivery returns 200 and stores nothing.
 - **Why events for disconnected connections are still stored:** `app_find_store_connection` returns any row for the shop, preferring a non-disconnected one. Shopify sends `app/uninstalled` and `shop/redact` after the connection is already disconnected; they must still be recorded and acted on. Only a shop with no connection row at all is acknowledged and dropped (logged without payload).
-- **Statuses:** `received` (stored), `processing` (claimed by a worker), `processed`, `failed` (error text sanitized, job rethrown so BullMQ retries), `ignored` (unknown topic), `deferred` (data topic parked for 1b-3).
+- **Statuses:** `received` (stored), `processing` (claimed by a worker), `processed`, `failed` (error text sanitized, job rethrown so BullMQ retries), `ignored` (unknown topic), `deferred` (data topic parked for 1b-3, payload emptied).
 - **Per topic (worker):**
   - `app/uninstalled`: connection set to `disconnected`, token wiped, audit `connection.uninstalled`, event `processed`.
   - `customers/data_request`, `customers/redact`: we hold no customer PII, so an audit row `privacy.request_recorded` (topic only, never the payload) is written and the event is `processed`.
   - `shop/redact`: calls `app_purge_store_connection` (section 7). The event row is deleted with the connection, so nothing is marked afterwards.
-  - `orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`, `products/create|update|delete`, `inventory_levels/update`: `deferred`.
+  - `orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`, `products/create|update|delete`, `inventory_levels/update`: not subscribed in 1b-2. If one arrives anyway it is marked `deferred` and its stored `payload` is replaced with `{}`, so no customer data is retained.
   - Anything else: `ignored`.
 - **Claim and reclaim:** the claim (`received` or `failed` to `processing`) commits before the work, so a `shop/redact` purge, whose cascade deletes the event row, never waits on our own row lock. A `processing` event whose `updated_at` is older than `STALE_EVENT_MS` (10 minutes) can be claimed again by another worker.
 - **Stale-event sweep:** every 5 minutes (`scheduleWebhookSweep`) the worker calls `app_list_stale_webhook_events`, which returns `received` events older than the cutoff and `processing` events whose `updated_at` is older than the cutoff (migration 0016), and re-enqueues them. Each sweep window uses a time-bucketed job id suffix (`_r<bucket>`) so a retained finished job never swallows the retry; double processing is safe because the claim is atomic.
@@ -118,7 +118,7 @@ The token is stored in `store_connections.encrypted_credentials` as AES-256-GCM 
 
 ## 7. Privacy and data removal
 
-Held: connection metadata (shop domain, scopes, status, errors), encrypted token, hashed OAuth states, and webhook payloads (tenant data under RLS, never logged). No customer PII is stored in 1b-2.
+Held: connection metadata (shop domain, scopes, status, errors), encrypted token, hashed OAuth states, and webhook payloads (tenant data under RLS, never logged). No customer PII is stored in 1b-2: no data topics are subscribed, and a data-topic event that arrives anyway keeps only `{}` once the worker defers it.
 
 `shop/redact` runs `app_purge_store_connection(org_id, connection_id)` (SECURITY DEFINER, worker only). It deletes the connection's inventory movements (the one intended path that removes ledger rows), sync runs, the shop's oauth states, and the connection row, which cascades to locations, levels, listings, orders, lines, refunds, cursors and webhook events. It does not delete the org's catalog (products, SKUs) or cost data. It writes an audit row `store_connection.purged` (reason `shop_redact`). Uninstall and privacy requests also write audit rows (`connection.uninstalled`, `privacy.request_recorded`).
 

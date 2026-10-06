@@ -4,8 +4,14 @@ import { AuthError, TransientError } from '../errors';
 import { isValidShopDomain } from './domain';
 import type { HttpClient } from './http';
 
-export const SHOPIFY_DATA_WEBHOOK_TOPICS = [
-  'app/uninstalled',
+/**
+ * Topics registered at install in 1b-2. Only the uninstall: data topics carry customer data, need Shopify's
+ * protected customer data approval and would only be parked unread until 1b-3 consumes them.
+ */
+export const SHOPIFY_WEBHOOK_TOPICS = ['app/uninstalled'] as const;
+
+/** Order, refund, product and stock topics, subscribed in 1b-3 together with their consumption. */
+export const SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS = [
   'orders/create',
   'orders/updated',
   'orders/cancelled',
@@ -39,7 +45,7 @@ export async function registerWebhooks(
   if (!isValidShopDomain(p.shop)) throw new RangeError('invalid shop domain');
   const registered: string[] = [];
   const failed: string[] = [];
-  for (const topic of p.topics ?? SHOPIFY_DATA_WEBHOOK_TOPICS) {
+  for (const topic of p.topics ?? SHOPIFY_WEBHOOK_TOPICS) {
     const res = await http.request({
       method: 'POST',
       url: `https://${p.shop}/admin/api/${p.apiVersion}/graphql.json`,

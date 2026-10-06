@@ -1,5 +1,10 @@
 import { describe, expect, it } from 'vitest';
-import { AuthError, registerWebhooks, SHOPIFY_DATA_WEBHOOK_TOPICS } from '../src';
+import {
+  AuthError,
+  registerWebhooks,
+  SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS,
+  SHOPIFY_WEBHOOK_TOPICS,
+} from '../src';
 import { FakeShopify } from '../src/testing';
 
 const p = {
@@ -10,15 +15,25 @@ const p = {
 };
 
 describe('registerWebhooks', () => {
-  it('registers every topic once and is idempotent on a second call', async () => {
+  it('registers only app/uninstalled by default, once, and is idempotent on a second call', async () => {
     const http = new FakeShopify();
     const first = await registerWebhooks(http, p);
     expect(first.failed).toEqual([]);
-    expect([...first.registered].sort()).toEqual([...SHOPIFY_DATA_WEBHOOK_TOPICS].sort());
-    expect(http.subscriptions.get('orders/updated')).toBe(p.callbackUrl);
+    expect(first.registered).toEqual(['app/uninstalled']);
+    expect([...SHOPIFY_WEBHOOK_TOPICS]).toEqual(['app/uninstalled']);
+    expect([...http.subscriptions.keys()]).toEqual(['app/uninstalled']);
+    expect(http.subscriptions.get('app/uninstalled')).toBe(p.callbackUrl);
+    expect(http.requests).toHaveLength(1);
     const second = await registerWebhooks(http, p);
     expect(second.failed).toEqual([]);
-    expect(second.registered).toHaveLength(SHOPIFY_DATA_WEBHOOK_TOPICS.length);
+    expect(second.registered).toEqual(['app/uninstalled']);
+  });
+  it('still registers the future data topics when asked (1b-3)', async () => {
+    const http = new FakeShopify();
+    const res = await registerWebhooks(http, { ...p, topics: SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS });
+    expect(res.failed).toEqual([]);
+    expect([...res.registered].sort()).toEqual([...SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS].sort());
+    expect(http.subscriptions.get('orders/updated')).toBe(p.callbackUrl);
   });
   it('sends the token as a header, targets the versioned GraphQL endpoint, keeps the token out of the body', async () => {
     const http = new FakeShopify();

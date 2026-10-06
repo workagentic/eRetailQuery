@@ -1,8 +1,15 @@
 import type { HttpClient, HttpRequest, HttpResponse } from '../shopify/http';
-import { SHOPIFY_DATA_WEBHOOK_TOPICS, topicToEnum } from '../shopify/webhooks';
+import {
+  SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS,
+  SHOPIFY_WEBHOOK_TOPICS,
+  topicToEnum,
+} from '../shopify/webhooks';
 
 const ENUM_TO_TOPIC = new Map<string, string>(
-  SHOPIFY_DATA_WEBHOOK_TOPICS.map((t) => [topicToEnum(t), t]),
+  [...SHOPIFY_WEBHOOK_TOPICS, ...SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS].map((t) => [
+    topicToEnum(t),
+    t,
+  ]),
 );
 
 /** In-memory Shopify for tests: OAuth token exchange and webhook subscriptions. Records every request. */

@@ -18,7 +18,10 @@ export interface WebhookHandlerDeps {
   now?: () => Date;
 }
 
-/** Order, product and stock topics are applied by the sync pipeline in 1b-3; until then they are parked. */
+/**
+ * Order, product and stock topics are applied by the sync pipeline in 1b-3. 1b-2 does not subscribe to them; if
+ * one arrives anyway it is parked as `deferred` with its payload (customer data) replaced by `{}`.
+ */
 const DATA_TOPICS = new Set([
   'orders/create',
   'orders/updated',
@@ -50,6 +53,8 @@ async function setStatus(
       error,
       updatedAt: now,
       ...(status === 'processed' ? { processedAt: now } : {}),
+      // Nothing is retained from a parked data-topic event: its payload can carry customer data.
+      ...(status === 'deferred' ? { payload: {} } : {}),
     })
     .where(and(eq(webhookEvents.orgId, orgId), eq(webhookEvents.id, id)));
 }

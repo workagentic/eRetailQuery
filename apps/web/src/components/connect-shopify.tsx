@@ -25,7 +25,7 @@ export function ConnectShopify() {
           onChange={(e) => setShop(e.target.value)}
           aria-describedby="shop-hint"
         />
-        <p id="shop-hint" className="text-sm text-muted-foreground" aria-live="polite">
+        <p id="shop-hint" className="text-sm text-muted-foreground">
           {shop.trim() === ''
             ? 'It looks like my-store.myshopify.com.'
             : hint.valid
@@ -33,6 +33,9 @@ export function ConnectShopify() {
               : 'That does not look like a Shopify address. Use the one ending in .myshopify.com.'}
         </p>
       </div>
+      <p role="status" className="sr-only">
+        {hint.valid ? 'Store address looks right.' : 'Store address is not valid yet.'}
+      </p>
       <Button type="submit" disabled={pending}>
         {pending ? 'Opening Shopify...' : 'Connect Shopify'}
       </Button>

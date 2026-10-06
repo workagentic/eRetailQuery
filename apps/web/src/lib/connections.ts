@@ -18,6 +18,18 @@ export function shopifyErrorMessage(code: string | undefined): string | null {
   return Object.hasOwn(ERROR_MESSAGES, code) ? (ERROR_MESSAGES[code] as string) : GENERIC_ERROR;
 }
 
+// Page-owned codes (not part of the API's SHOPIFY_ERROR_CODES).
+const PAGE_ERROR_MESSAGES: Record<string, string> = {
+  disconnect_failed: 'We could not disconnect that store. Please try again.',
+};
+
+export function connectionsErrorMessage(code: string | undefined): string | null {
+  if (code !== undefined && Object.hasOwn(PAGE_ERROR_MESSAGES, code)) {
+    return PAGE_ERROR_MESSAGES[code] as string;
+  }
+  return shopifyErrorMessage(code);
+}
+
 export function shopifyWarningMessage(code: string | undefined): string | null {
   return code === 'webhooks'
     ? 'Connected, but live updates could not be set up. Reconnect to try again.'
@@ -53,13 +65,18 @@ export function describeConnection(c: ConnectionDto, now: Date): ConnectionView 
   switch (c.status) {
     case 'active':
       return c.lastError
-        ? { label: 'Needs attention', tone: 'warn', detail: c.lastError, canReconnect: true }
+        ? {
+            label: 'Needs attention',
+            tone: 'warn',
+            detail: `${c.lastError} ${synced}`,
+            canReconnect: true,
+          }
         : { label: 'Connected', tone: 'ok', detail: synced, canReconnect: false };
     case 'error':
       return {
         label: 'Needs attention',
         tone: 'warn',
-        detail: c.lastError ?? 'Something went wrong with this connection.',
+        detail: `${c.lastError ?? 'Something went wrong with this connection.'} ${synced}`,
         canReconnect: true,
       };
     case 'disconnected':

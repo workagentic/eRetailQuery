@@ -1,15 +1,15 @@
-import { Button, Card, CardContent, CardHeader, CardTitle } from '@erq/ui';
+import { Card, CardContent, CardHeader, CardTitle } from '@erq/ui';
 import { hasRole, type ConnectionDto } from '@erq/shared';
 import { ConnectShopify, ReconnectShopify } from '@/components/connect-shopify';
+import { DisconnectButton } from '@/components/disconnect-button';
 import { apiFetch } from '@/lib/api';
 import { loadAppContext } from '@/lib/app-context';
 import {
   describeConnection,
-  shopifyErrorMessage,
+  connectionsErrorMessage,
   shopifyWarningMessage,
   type ConnectionView,
 } from '@/lib/connections';
-import { disconnectConnection } from './actions';
 
 type Param = string | string[] | undefined;
 const first = (v: Param): string | undefined => (Array.isArray(v) ? v[0] : v);
@@ -27,15 +27,16 @@ export default async function ConnectionsPage({
 }) {
   const params = await searchParams;
   const { active } = await loadAppContext();
+  // Never show the raw error; the Connect card stays usable.
   const connections = await apiFetch<ConnectionDto[]>(`/orgs/${active.orgId}/connections`, {
     orgId: active.orgId,
-  });
+  }).catch(() => null);
   const isAdmin = hasRole(active.role, 'admin');
   const now = new Date();
 
   // Messages come from fixed maps; query text is never rendered.
   const connected = first(params.shopify) === 'connected';
-  const errorMessage = shopifyErrorMessage(first(params.shopify_error));
+  const errorMessage = connectionsErrorMessage(first(params.shopify_error));
   const warningMessage = shopifyWarningMessage(first(params.warning));
 
   return (
@@ -82,7 +83,11 @@ export default async function ConnectionsPage({
           <CardTitle>Your stores</CardTitle>
         </CardHeader>
         <CardContent>
-          {connections.length === 0 ? (
+          {connections === null ? (
+            <p role="alert" className="text-sm text-destructive">
+              We could not load your connections. Please refresh the page.
+            </p>
+          ) : connections.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               Connect your Shopify store to see your real profit. It takes about a minute.
             </p>
@@ -107,13 +112,7 @@ export default async function ConnectionsPage({
                         <ReconnectShopify shop={c.shop} />
                       )}
                       {isAdmin && c.status !== 'disconnected' && c.status !== 'demo' && (
-                        <form action={disconnectConnection}>
-                          <input type="hidden" name="id" value={c.id} />
-                          <Button type="submit" size="sm" variant="ghost">
-                            Disconnect
-                            <span className="sr-only"> {c.shop}</span>
-                          </Button>
-                        </form>
+                        <DisconnectButton id={c.id} shop={c.shop} />
                       )}
                     </div>
                   </li>

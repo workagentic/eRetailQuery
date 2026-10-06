@@ -15,9 +15,9 @@ export async function startShopifyInstall(
   if (typeof shop !== 'string' || shop.trim() === '') {
     return { error: 'Enter your Shopify store address.' };
   }
-  const { active } = await loadAppContext();
   let authorizeUrl: string;
   try {
+    const { active } = await loadAppContext();
     const res = await apiFetch<InstallResponse>(
       `/orgs/${active.orgId}/connections/shopify/install`,
       { method: 'POST', orgId: active.orgId, body: JSON.stringify({ shop: shop.trim() }) },
@@ -40,7 +40,7 @@ export async function startShopifyInstall(
 
 export async function disconnectConnection(formData: FormData): Promise<void> {
   const id = formData.get('id');
-  if (typeof id !== 'string' || id === '') redirect('/connections?shopify_error=server_error');
+  if (typeof id !== 'string' || id === '') redirect('/connections?shopify_error=disconnect_failed');
   const { active } = await loadAppContext();
   let failed = false;
   try {
@@ -51,6 +51,6 @@ export async function disconnectConnection(formData: FormData): Promise<void> {
   } catch {
     failed = true;
   }
-  if (failed) redirect('/connections?shopify_error=server_error');
+  if (failed) redirect('/connections?shopify_error=disconnect_failed');
   revalidatePath('/connections');
 }

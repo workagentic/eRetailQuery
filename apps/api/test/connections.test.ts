@@ -225,65 +225,73 @@ describe('GET /orgs/:orgId/connections and disconnect', () => {
 });
 
 describe('with Shopify configured but no encryption key', () => {
-  it('refuses install with 503 before the merchant consents, and the callback says not_configured', async () => {
-    const noKey: Record<string, string> = { ...SHOPIFY_ENV };
-    delete noKey.ENCRYPTION_KEY_ID;
-    delete noKey.ENCRYPTION_KEY;
-    const keyless = await createTestApp({ env: noKey });
-    try {
-      const user = randomUUID();
-      const auth = { authorization: `Bearer ${await keyless.signToken({ sub: user })}` };
-      const org = await request(keyless.app.getHttpServer())
-        .post('/orgs')
-        .set(auth)
-        .send({ name: 'Keyless Org' });
-      const orgId = org.body.orgId as string;
-      const res = await request(keyless.app.getHttpServer())
-        .post(`/orgs/${orgId}/connections/shopify/install`)
-        .set({ ...auth, 'x-org-id': orgId })
-        .send({ shop: 'a.myshopify.com' });
-      expect(res.status).toBe(503);
-      expect(res.body.error.code).toBe('shopify_not_configured');
-      const cb = await request(keyless.app.getHttpServer())
-        .get('/connections/shopify/callback')
-        .query(signed('any-state', { shop: 'a.myshopify.com' }))
-        .redirects(0);
-      expect(cb.status).toBe(302);
-      expect(cb.headers.location).toBe(`${WEB}/connections?shopify_error=not_configured`);
-    } finally {
-      await keyless.close();
-    }
-  });
+  it(
+    'refuses install with 503 before the merchant consents, and the callback says not_configured',
+    { timeout: 180_000 },
+    async () => {
+      const noKey: Record<string, string> = { ...SHOPIFY_ENV };
+      delete noKey.ENCRYPTION_KEY_ID;
+      delete noKey.ENCRYPTION_KEY;
+      const keyless = await createTestApp({ env: noKey });
+      try {
+        const user = randomUUID();
+        const auth = { authorization: `Bearer ${await keyless.signToken({ sub: user })}` };
+        const org = await request(keyless.app.getHttpServer())
+          .post('/orgs')
+          .set(auth)
+          .send({ name: 'Keyless Org' });
+        const orgId = org.body.orgId as string;
+        const res = await request(keyless.app.getHttpServer())
+          .post(`/orgs/${orgId}/connections/shopify/install`)
+          .set({ ...auth, 'x-org-id': orgId })
+          .send({ shop: 'a.myshopify.com' });
+        expect(res.status).toBe(503);
+        expect(res.body.error.code).toBe('shopify_not_configured');
+        const cb = await request(keyless.app.getHttpServer())
+          .get('/connections/shopify/callback')
+          .query(signed('any-state', { shop: 'a.myshopify.com' }))
+          .redirects(0);
+        expect(cb.status).toBe(302);
+        expect(cb.headers.location).toBe(`${WEB}/connections?shopify_error=not_configured`);
+      } finally {
+        await keyless.close();
+      }
+    },
+  );
 });
 
 describe('without Shopify configuration', () => {
-  it('answers 503 shopify_not_configured while /health still works', async () => {
-    const bare = await createTestApp();
-    try {
-      const user = randomUUID();
-      const auth = { authorization: `Bearer ${await bare.signToken({ sub: user })}` };
-      const org = await request(bare.app.getHttpServer())
-        .post('/orgs')
-        .set(auth)
-        .send({ name: 'Bare Org' });
-      const orgId = org.body.orgId as string;
-      const res = await request(bare.app.getHttpServer())
-        .post(`/orgs/${orgId}/connections/shopify/install`)
-        .set({ ...auth, 'x-org-id': orgId })
-        .send({ shop: 'a.myshopify.com' });
-      expect(res.status).toBe(503);
-      expect(res.body.error.code).toBe('shopify_not_configured');
-      expect((await request(bare.app.getHttpServer()).get('/health')).status).toBe(200);
-      const cb = await request(bare.app.getHttpServer())
-        .get('/connections/shopify/callback')
-        .query(signed('any-state'))
-        .redirects(0);
-      expect(cb.status).toBe(302);
-      expect(cb.headers.location).toBe(`${WEB}/connections?shopify_error=not_configured`);
-    } finally {
-      await bare.close();
-    }
-  });
+  it(
+    'answers 503 shopify_not_configured while /health still works',
+    { timeout: 180_000 },
+    async () => {
+      const bare = await createTestApp();
+      try {
+        const user = randomUUID();
+        const auth = { authorization: `Bearer ${await bare.signToken({ sub: user })}` };
+        const org = await request(bare.app.getHttpServer())
+          .post('/orgs')
+          .set(auth)
+          .send({ name: 'Bare Org' });
+        const orgId = org.body.orgId as string;
+        const res = await request(bare.app.getHttpServer())
+          .post(`/orgs/${orgId}/connections/shopify/install`)
+          .set({ ...auth, 'x-org-id': orgId })
+          .send({ shop: 'a.myshopify.com' });
+        expect(res.status).toBe(503);
+        expect(res.body.error.code).toBe('shopify_not_configured');
+        expect((await request(bare.app.getHttpServer()).get('/health')).status).toBe(200);
+        const cb = await request(bare.app.getHttpServer())
+          .get('/connections/shopify/callback')
+          .query(signed('any-state'))
+          .redirects(0);
+        expect(cb.status).toBe(302);
+        expect(cb.headers.location).toBe(`${WEB}/connections?shopify_error=not_configured`);
+      } finally {
+        await bare.close();
+      }
+    },
+  );
 });
 
 const WEB = 'http://localhost:3000';

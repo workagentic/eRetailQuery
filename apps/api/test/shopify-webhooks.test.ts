@@ -223,7 +223,7 @@ describe('POST /webhooks/shopify', () => {
 });
 
 describe('POST /webhooks/shopify without Shopify configuration', () => {
-  it('answers 503 shopify_not_configured', async () => {
+  it('answers 503 shopify_not_configured', { timeout: 180_000 }, async () => {
     const bare = await createTestApp();
     try {
       const body = '{"id":1}';

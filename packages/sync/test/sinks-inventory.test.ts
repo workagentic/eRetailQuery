@@ -16,15 +16,25 @@ beforeAll(async () => {
     await upsertProducts(tx, ctx, data.products);
   });
 });
-afterAll(async () => { await env?.stop(); });
+afterAll(async () => {
+  await env?.stop();
+});
 
-const run = (items: NormalizedInventoryLevel[], ctx = sinkContext()) => env.db.withTenant(ORG_A, (tx) => upsertInventory(tx, ctx, items));
-const count = async (table: string) => Number((await env.owner.query(`select count(*) c from ${table} where org_id = $1`, [ORG_A])).rows[0].c);
+const run = (items: NormalizedInventoryLevel[], ctx = sinkContext()) =>
+  env.db.withTenant(ORG_A, (tx) => upsertInventory(tx, ctx, items));
+const count = async (table: string) =>
+  Number(
+    (await env.owner.query(`select count(*) c from ${table} where org_id = $1`, [ORG_A])).rows[0].c,
+  );
 const level = async (variant: string, loc: string) =>
-  (await env.owner.query(
-    `select l.on_hand, l.reserved, l.incoming from inventory_levels l
+  (
+    await env.owner.query(
+      `select l.on_hand, l.reserved, l.incoming from inventory_levels l
        join sku_channel_listings cl on cl.sku_id = l.sku_id and cl.external_variant_id = $1
-       join locations lo on lo.id = l.location_id and lo.external_id = $2 where l.org_id = $3`, [variant, loc, ORG_A])).rows[0];
+       join locations lo on lo.id = l.location_id and lo.external_id = $2 where l.org_id = $3`,
+      [variant, loc, ORG_A],
+    )
+  ).rows[0];
 
 describe('upsertInventory', () => {
   it('creates levels (including negative on_hand) and one opening movement per level', async () => {
@@ -53,7 +63,15 @@ describe('upsertInventory', () => {
 
   it('updates reserved and incoming without writing a movement when on_hand is unchanged', async () => {
     const base = data.inventory[0]!;
-    await run([{ ...base, onHand: 35, reserved: 7, incoming: 3, updatedAt: new Date('2026-09-11T09:00:00Z') }]);
+    await run([
+      {
+        ...base,
+        onHand: 35,
+        reserved: 7,
+        incoming: 3,
+        updatedAt: new Date('2026-09-11T09:00:00Z'),
+      },
+    ]);
     expect(await level('v-1', 'loc-1')).toEqual({ on_hand: 35, reserved: 7, incoming: 3 });
     expect(await count('inventory_movements')).toBe(7);
   });
@@ -63,7 +81,13 @@ describe('upsertInventory', () => {
     const result = await run([
       { ...base, externalVariantId: 'v-unknown' },
       { ...base, locationExternalId: 'loc-unknown' },
-      { ...base, onHand: 35, reserved: 7, incoming: 3, updatedAt: new Date('2026-09-11T09:00:00Z') },
+      {
+        ...base,
+        onHand: 35,
+        reserved: 7,
+        incoming: 3,
+        updatedAt: new Date('2026-09-11T09:00:00Z'),
+      },
     ]);
     expect(result).toEqual({ processed: 1, skipped: 2 });
   });
@@ -71,7 +95,9 @@ describe('upsertInventory', () => {
   it('keeps the ledger consistent: movements always sum to on_hand', async () => {
     const { rows } = await env.owner.query(
       `select l.on_hand, coalesce((select sum(m.delta) from inventory_movements m where m.sku_id = l.sku_id and m.location_id = l.location_id), 0)::int as moved
-         from inventory_levels l where l.org_id = $1`, [ORG_A]);
+         from inventory_levels l where l.org_id = $1`,
+      [ORG_A],
+    );
     expect(rows.length).toBe(6);
     for (const r of rows) expect(r.moved).toBe(r.on_hand);
   });

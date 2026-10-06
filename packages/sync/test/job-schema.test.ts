@@ -35,4 +35,24 @@ describe('parseSyncPageJob', () => {
   it('rejects unknown keys so credentials can never travel in job data', () => {
     expect(() => parseSyncPageJob({ ...base, accessToken: 'shpat_x' })).toThrow();
   });
+  it('rejects a backfill chain without since, accepts an incremental chain without since', () => {
+    expect(() =>
+      parseSyncPageJob({
+        ...base,
+        then: { resources: ['products'], mode: 'backfill', since: null },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseSyncPageJob({
+        ...base,
+        then: { resources: ['products'], mode: 'backfill', since: '2026-01-01T00:00:00.000Z' },
+      }),
+    ).not.toThrow();
+    expect(() =>
+      parseSyncPageJob({
+        ...base,
+        then: { resources: ['products'], mode: 'incremental', since: null },
+      }),
+    ).not.toThrow();
+  });
 });

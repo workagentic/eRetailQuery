@@ -15,6 +15,10 @@ const schema = z
         since: z.string().datetime().nullable(),
       })
       .strict()
+      .refine((t) => t.mode !== 'backfill' || t.since !== null, {
+        message: 'a backfill chain requires since',
+        path: ['since'],
+      })
       .optional(),
   })
   .strict();

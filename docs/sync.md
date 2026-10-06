@@ -118,3 +118,7 @@ Queue: `BullMqJobQueue` adds jobs named `page` to the `sync` queue with 5 attemp
 - **`store_connections.last_synced_at` is not maintained,** and the connection status is not reset to `active` after a successful sync that follows an `AuthError`.
 - **`updated_since` has no overlap margin.** The incremental watermark is the worker clock at run start, so clock skew or late-arriving platform updates can be missed.
 - **Rate-limit numbers are placeholders** until 1b-2 and 1b-3.
+
+## 7. Webhook events handoff (from 1b-2)
+
+1b-2 stores every verified Shopify webhook in `webhook_events` (deduplicated on connection and webhook id). Data topics (`orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`, `products/create|update|delete`, `inventory_levels/update`) are parked with status `deferred` and their raw `payload`; nothing in 1b-2 applies them. 1b-3 should consume `deferred` events (apply them through the existing sinks or use them as a trigger for an incremental sync), then mark them `processed`, and decide a retention policy since payloads are tenant data. Webhooks do not replace the incremental sync: a missed event is only recovered by the next sync. See `docs/shopify-connection.md` for statuses, the sweep and known gaps.

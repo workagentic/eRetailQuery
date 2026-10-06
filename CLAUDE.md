@@ -458,7 +458,7 @@ When any of these block a decision, ask the owner rather than guessing.
 
 Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`. Each later phase gets its own spec and plan. Read `docs/dev-setup.md` and `docs/architecture/tenancy.md` before changing the database, auth or CI.
 
-**Built:** pnpm/Turborepo monorepo (`apps/api`, `apps/web`, `apps/worker`; `packages/shared`, `db`, `ui`, `metrics` (pricing, ad flags, inventory flags, monthly P&L: see docs/metrics.md), `connectors` (page-based `fetchPage` contract, typed errors, credential helpers, registry, fake connector and contract suite), `sync` (page-job engine and idempotent sinks: see docs/sync.md)). Postgres schema with RLS for identity, audit log, connections, products, SKUs, time-versioned cost components, and (Phase 1b-1) locations, inventory levels and movements, channel listings, orders, order lines, refunds and sync cursors. Supabase Auth with a NestJS API (`/me`, `/orgs`, members, invites), a BullMQ worker with a tenant-scoped job wrapper, a Next.js shell (sign in, onboarding, org switcher, team, invites), an idempotent demo seed, and a CI workflow.
+**Built:** pnpm/Turborepo monorepo (`apps/api`, `apps/web`, `apps/worker`; `packages/shared`, `db`, `ui`, `metrics` (pricing, ad flags, inventory flags, monthly P&L: see docs/metrics.md), `connectors` (page-based `fetchPage` contract, typed errors, credential helpers, registry, fake connector and contract suite), `sync` (page-job engine and idempotent sinks: see docs/sync.md)). Postgres schema with RLS for identity, audit log, connections, products, SKUs, time-versioned cost components, and (Phase 1b-1) locations, inventory levels and movements, channel listings, orders, order lines, refunds and sync cursors. Supabase Auth with a NestJS API (`/me`, `/orgs`, members, invites), a BullMQ worker with a tenant-scoped job wrapper, a Next.js shell (sign in, onboarding, org switcher, team, invites), an idempotent demo seed, and a CI workflow. Phase 1b-2 adds the Shopify connection (see docs/shopify-connection.md): OAuth install with an encrypted token, a webhook receiver with dedupe, uninstall and privacy-webhook handling in the worker (`shop/redact` purges the connection), a Connections page, the `oauth_states` and `webhook_events` tables, and `packages/connectors/src/shopify`. It fetches no Shopify data yet (1b-3).
 
 **Rules that are easy to break:**
 - Every tenant database call goes through `withTenant(orgId, fn)`. Every new tenant table needs a migration that calls `app_secure_tenant_table`, a fixture in `packages/db/test/fixtures.ts`, and composite `(org_id, id)` foreign keys to tenant parents. The isolation suite fails otherwise.
@@ -468,12 +468,16 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - Apps must never import `@erq/db/admin` (ESLint enforces this).
 - Sync sinks must be idempotent and respect `external_updated_at` (an older update never overwrites newer data). A sync cursor never advances without its data: both commit in the same transaction. Connectors never touch the database.
 - Connection credentials are encrypted with AAD `connection:<id>` and never travel in job data. `app_list_stalled_sync_cursors` is the only intentional cross-tenant read; never expose it through an API route.
+- Webhook endpoints verify the HMAC over the raw body and are idempotent. Public routes (`/connections/shopify/callback`, `/webhooks/shopify`) never trust the query or body for org or user.
+- The four 1b-2 SECURITY DEFINER functions (`app_consume_oauth_state`, `app_find_store_connection`, `app_list_stale_webhook_events`, `app_purge_store_connection`) are never exposed through authenticated routes. Stored error text goes through `sanitizeMessage`. Disconnecting is a status change, never a row delete (only `shop/redact` purges).
 - Post-login redirects go through `safeNextPath`. Do not build redirect targets from user input any other way.
 - New API controllers must apply `AuthGuard`, `OrgGuard`, `RolesGuard` in that order on every route; guards are not global yet.
 
 **Commands:** `pnpm dev`, `pnpm db:migrate`, `pnpm db:seed`, `pnpm test`, `pnpm test:e2e`, `pnpm lint`, `pnpm typecheck`. On small disks run `pnpm turbo run test --concurrency=1`. Tests use Testcontainers when Docker is available, otherwise an embedded Postgres (`ERQ_TEST_DB=docker|embedded|auto`).
 
-**Not yet verified by running:** the Redis rate limiter, the BullMQ sync queue and the sync worker (no Redis or Docker in dev), the BullMQ system-worker test, the Playwright e2e, live Supabase login and middleware flows, the seed CLI, and the CI workflow. The first CI run with Docker is their first execution.
+**Not yet verified by running:** the Redis rate limiter, the BullMQ sync queue and the sync worker (no Redis or Docker in dev), the BullMQ system-worker test, the Playwright e2e, live Supabase login and middleware flows, the seed CLI, and the CI workflow. The first CI run with Docker is their first execution. Also unverified (1b-2): everything against real Shopify, the BullMQ webhook queue, worker and sweep, and the Playwright connect test.
+
+**Known open items:** the embedded Postgres test helper kills its process tree on stop, exit and signals, but POSIX paths are unverified and an orphan `io_worker` child was seen once after a single-file run on Windows; check for leftover `postgres` processes and `%TEMP%\erq-pg-*` after test runs. Shopify token refresh (expiring offline tokens) is deferred to 1b-3, and `shop_in_use` is a check-then-act without a unique index.
 
 **Known deferred items:** global deny-by-default guard, `money(-0)` handling and extra money tests (Phase 1a), Swagger gating in production, worker shutdown robustness, UX polish on the web pages, and the seed slug `demo` colliding with a real org named "Demo".
 
@@ -507,3 +511,9 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - 2026-10-06: Shopify cost import never overwrites existing costs. It writes a `product_cost` component only when the SKU has none.
 - 2026-10-06: Order dates used for cost snapshots are taken in the org timezone.
 - 2026-10-06: Stalled sync runs are found through the SECURITY DEFINER function `app_list_stalled_sync_cursors`, because the resumer has no org context.
+- 2026-10-07: The Shopify connection is built against fakes until a Partner app exists; nothing has run against real Shopify.
+- 2026-10-07: Webhooks are verified, stored, deduplicated and acknowledged fast, then processed by the worker.
+- 2026-10-07: Data-topic webhook events (orders, refunds, products, inventory) are stored with status `deferred` for 1b-3.
+- 2026-10-07: `shop/redact` purges the connection's data through the SECURITY DEFINER function `app_purge_store_connection`; the org's catalog and costs are kept.
+- 2026-10-07: A shop can be actively connected to only one org (check-then-act in the callback, no unique index yet).
+- 2026-10-07: Only the read-only scopes 1b-3 needs are requested (`read_products`, `read_inventory`, `read_locations`, `read_orders`); protected customer data is not requested.

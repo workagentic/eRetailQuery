@@ -73,10 +73,13 @@ function pidAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (e) {
+    return (e as NodeJS.ErrnoException).code === 'EPERM'; // exists but not ours; ESRCH means gone
   }
 }
+
+/** Directories whose Windows tree kill and sweep already ran, so the second pass is skipped. */
+const swept = new Set<string>();
 
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
@@ -84,6 +87,12 @@ function sleepSync(ms: number): void {
 
 /** Kills the postmaster tree for pid. Works even if the pid file is already gone. Never throws. */
 function killTreeSync(pid: number, dir: string): void {
+  if (process.platform === 'win32') {
+    if (swept.has(dir)) return;
+    swept.add(dir);
+  } else if (!pidAlive(pid)) {
+    return;
+  }
   try {
     if (process.platform === 'win32') {
       // /T kills the whole tree: pg.stop() only stops the postmaster and leaves backends behind on Windows.
@@ -116,6 +125,23 @@ function killTreeSync(pid: number, dir: string): void {
   }
 }
 
+/**
+ * Same as killTreeSync but never blocks the event loop on POSIX (Node must stay free to reap the child),
+ * so it can wait for the postmaster to exit. Gives up after ~3s.
+ */
+async function killTree(pid: number, dir: string): Promise<void> {
+  if (process.platform === 'win32') {
+    killTreeSync(pid, dir);
+    return;
+  }
+  try {
+    process.kill(pid, 'SIGQUIT'); // immediate shutdown
+  } catch {
+    return; // already gone
+  }
+  for (let i = 0; i < 30 && pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 100));
+}
+
 /** Kills the server for dir (remembered pid, else postmaster.pid), then removes dir. Never throws. */
 function killServerSync(dir: string): void {
   const pid = live.get(dir) ?? readPid(dir);
@@ -126,6 +152,7 @@ function killServerSync(dir: string): void {
     // best effort
   }
   live.delete(dir);
+  swept.delete(dir);
 }
 
 /** Reaps every embedded database this process started and did not stop. Safe to call repeatedly. */
@@ -180,8 +207,18 @@ async function startEmbedded(): Promise<TestDatabase> {
           // Kill the whole tree while the postmaster is still alive: once it has exited (even cleanly), its
           // children (e.g. PG 18 io_worker) are orphaned and can no longer be found through the tree.
           const pid = live.get(dir);
-          if (pid !== undefined) killTreeSync(pid, dir);
-          await Promise.race([pg.stop(), new Promise((resolve) => setTimeout(resolve, 5000))]);
+          if (pid !== undefined) await killTree(pid, dir);
+          let timer: NodeJS.Timeout | undefined;
+          try {
+            await Promise.race([
+              pg.stop(),
+              new Promise((resolve) => {
+                timer = setTimeout(resolve, 5000);
+              }),
+            ]);
+          } finally {
+            clearTimeout(timer);
+          }
         } catch {
           // fall through to the forced cleanup
         } finally {

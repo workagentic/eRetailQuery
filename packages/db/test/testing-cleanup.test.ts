@@ -19,27 +19,49 @@ async function waitDead(pid: number, ms = 5000): Promise<boolean> {
   }
   return !alive(pid);
 }
-/** Command lines of processes mentioning dir, or undefined if no process listing tool works. */
-function processesMentioning(dir: string): string[] | undefined {
+/** Pids of all descendants of root (recursive), or undefined if no process listing tool works. */
+function descendantsOf(root: number): number[] | undefined {
   try {
+    const out: number[] = [];
     if (process.platform === 'win32') {
-      const out = execFileSync(
+      const text = execFileSync(
         'powershell',
         [
           '-NoProfile',
           '-Command',
-          `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*${dir}*' } | ForEach-Object { $_.CommandLine }`,
+          'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
         ],
         { encoding: 'utf8', windowsHide: true },
       );
-      return out.split('\n').filter((l) => l.trim());
+      const kids = new Map<number, number[]>();
+      for (const line of text.split('\n')) {
+        const [pid, ppid] = line.trim().split(' ').map(Number);
+        if (!pid || !ppid) continue;
+        kids.set(ppid, [...(kids.get(ppid) ?? []), pid]);
+      }
+      const walk = (p: number): void => {
+        for (const k of kids.get(p) ?? []) {
+          out.push(k);
+          walk(k);
+        }
+      };
+      walk(root);
+      return out;
     }
-    try {
-      return execFileSync('pgrep', ['-f', dir], { encoding: 'utf8' }).split('\n').filter(Boolean);
-    } catch (e) {
-      if ((e as { status?: number }).status === 1) return []; // pgrep: no match
-      throw e;
-    }
+    const walk = (p: number): void => {
+      let text = '';
+      try {
+        text = execFileSync('pgrep', ['-P', String(p)], { encoding: 'utf8' });
+      } catch (e) {
+        if ((e as { status?: number }).status !== 1) throw e; // 1 = no children
+      }
+      for (const k of text.split('\n').filter(Boolean).map(Number)) {
+        out.push(k);
+        walk(k);
+      }
+    };
+    walk(root);
+    return out;
   } catch {
     return undefined;
   }
@@ -67,12 +89,14 @@ describe('embedded test database cleanup', () => {
     const pid = pidOf(dir)!;
     expect(existsSync(dir)).toBe(true);
     expect(alive(pid)).toBe(true);
+    const kids = descendantsOf(pid);
+    if (kids === undefined) console.warn('process listing unavailable: skipping orphan check');
+    else expect(kids.length).toBeGreaterThan(0); // not vacuous: the postmaster has children
     await db.stop();
-    expect(existsSync(dir)).toBe(false);
     expect(await waitDead(pid)).toBe(true);
-    const left = processesMentioning(dir);
-    if (left === undefined) console.warn('process listing unavailable: skipping orphan check');
-    else expect(left).toEqual([]);
+    for (const kid of kids ?? [])
+      expect(await waitDead(kid), `child ${kid} still running`).toBe(true);
+    expect(existsSync(dir)).toBe(false);
   });
 
   it('cleanupLeakedDatabases() reaps a database that was never stopped', async () => {

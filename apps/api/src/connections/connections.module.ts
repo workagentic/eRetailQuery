@@ -1,10 +1,16 @@
 import { Inject, Injectable, Module, OnApplicationShutdown, type Provider } from '@nestjs/common';
 import { Queue } from 'bullmq';
 import IORedis from 'ioredis';
-import { createFetchHttpClient, shopifyConfigSchema, type ShopifyConfig } from '@erq/connectors';
+import type { Logger } from 'pino';
+import {
+  createFetchHttpClient,
+  sanitizeMessage,
+  shopifyConfigSchema,
+  type ShopifyConfig,
+} from '@erq/connectors';
 import { createConnectionsApi, type TenantDb } from '@erq/db';
 import { EnvKeyProvider, WEBHOOK_QUEUE } from '@erq/shared';
-import { APP_CONFIG } from '../config/config.module';
+import { APP_CONFIG, LOGGER } from '../config/config.module';
 import type { Env } from '../config/env';
 import { TENANT_DB } from '../db/db.module';
 import { ConnectionsController } from './connections.controller';
@@ -75,10 +81,16 @@ const providers: Provider[] = [
   },
   {
     provide: REDIS_RESOURCES,
-    inject: [APP_CONFIG],
-    useFactory: (env: Env): RedisResources | null => {
+    inject: [APP_CONFIG, LOGGER],
+    useFactory: (env: Env, logger: Logger): RedisResources | null => {
       if (!env.REDIS_URL) return null;
-      const connection = new IORedis(env.REDIS_URL, { maxRetriesPerRequest: null });
+      // Producer settings: fail fast while Redis is down instead of queueing commands forever, so the webhook
+      // receiver can still answer Shopify (the event row stays 'received' and the worker sweep recovers it).
+      const connection = new IORedis(env.REDIS_URL, {
+        maxRetriesPerRequest: 1,
+        enableOfflineQueue: false,
+      });
+      connection.on('error', (err) => logger.warn({ err: sanitizeMessage(err) }, 'redis error'));
       return { connection, queue: new Queue(WEBHOOK_QUEUE, { connection }) };
     },
   },

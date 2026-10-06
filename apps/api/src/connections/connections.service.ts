@@ -39,6 +39,9 @@ import {
 } from './tokens';
 import type { WebhookQueue } from './webhook-queue';
 
+/** How long the webhook receiver waits for the queue before answering anyway (the worker sweep recovers). */
+export const WEBHOOK_ENQUEUE_TIMEOUT_MS = 2000;
+
 @Injectable()
 export class ConnectionsService {
   constructor(
@@ -299,11 +302,23 @@ export class ConnectionsService {
     );
     const row = inserted[0];
     if (!row) return 'duplicate';
+    // Shopify waits about 5s for the ack; a slow or unreachable Redis must not hold the answer.
+    let timer: NodeJS.Timeout | undefined;
     try {
-      await this.webhookQueue.enqueue({ orgId, eventId: row.id });
+      await Promise.race([
+        this.webhookQueue.enqueue({ orgId, eventId: row.id }),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error('webhook enqueue timed out')),
+            WEBHOOK_ENQUEUE_TIMEOUT_MS,
+          );
+        }),
+      ]);
     } catch (err) {
       // The row stays 'received'; the worker sweep picks it up.
       this.logger.warn({ err: sanitizeMessage(err), eventId: row.id }, 'webhook enqueue failed');
+    } finally {
+      clearTimeout(timer);
     }
     return 'stored';
   }

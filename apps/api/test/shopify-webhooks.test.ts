@@ -4,6 +4,7 @@ import request from 'supertest';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { signWebhook } from '@erq/connectors/testing';
 import type { WebhookJob } from '@erq/shared';
+import { WEBHOOK_ENQUEUE_TIMEOUT_MS } from '../src/connections/connections.service';
 import { WEBHOOK_QUEUE_PORT } from '../src/connections/tokens';
 import type { WebhookQueue } from '../src/connections/webhook-queue';
 import { createTestApp, type TestApp } from './helpers/app';
@@ -12,7 +13,12 @@ const SECRET = 'test-secret';
 class RecordingQueue implements WebhookQueue {
   jobs: WebhookJob[] = [];
   failNext = false;
+  hangNext = false;
   async enqueue(job: WebhookJob): Promise<void> {
+    if (this.hangNext) {
+      this.hangNext = false;
+      return new Promise<void>(() => {}); // Redis down with commands queued forever
+    }
     if (this.failNext) {
       this.failNext = false;
       throw new Error('redis down');
@@ -150,6 +156,22 @@ describe('POST /webhooks/shopify', () => {
     const body = '{"id":6}';
     const headers = hdr(body);
     expect((await post(body, headers)).status).toBe(200);
+    const row = (await events()).find(
+      (e) => e.external_event_id === headers['x-shopify-webhook-id'],
+    );
+    expect(row.status).toBe('received');
+    expect(queue.jobs).toHaveLength(0);
+  });
+  it('answers 200 within the enqueue timeout when the queue never answers, keeping the event received', async () => {
+    queue.hangNext = true;
+    const body = '{"id":9}';
+    const headers = hdr(body);
+    const started = Date.now();
+    const res = await post(body, headers);
+    const elapsed = Date.now() - started;
+    expect(res.status).toBe(200);
+    expect(elapsed).toBeGreaterThanOrEqual(WEBHOOK_ENQUEUE_TIMEOUT_MS - 100);
+    expect(elapsed).toBeLessThan(WEBHOOK_ENQUEUE_TIMEOUT_MS + 3000);
     const row = (await events()).find(
       (e) => e.external_event_id === headers['x-shopify-webhook-id'],
     );

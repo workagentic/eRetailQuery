@@ -8,7 +8,7 @@ import {
   sum,
   type Money,
 } from '@erq/shared';
-import { formatBps, moneyRatioBps, type Bps } from './bps';
+import { formatBps, moneyRatioBps, mulDivRound, toSafeInteger, type Bps } from './bps';
 
 export interface CostComponent {
   componentType: string;
@@ -86,6 +86,48 @@ export interface SkuPricing {
   idealRange: { low: Money; high: Money } | null;
   status: { code: 'underpriced' | 'healthy' | 'premium' | 'unknown'; explanation: string };
   warning: { code: 'markup_ok_contribution_negative'; explanation: string } | null;
+  /** Lowest price whose contribution is at or above the minimum, null when unknown or impossible. */
+  floorPrice: Money | null;
+  floorExplanation: string | null;
+  /** Largest discount that keeps contribution at or above the minimum. */
+  maxDiscount: Money | null;
+}
+
+/** Does a net price of `net` cents reach the minimum contribution? Same rounding as skuPricing. */
+function meetsMinimum(
+  net: number,
+  landedCents: number,
+  fixedCents: number,
+  pct: Bps,
+  minContribution: Bps,
+): boolean {
+  const contribution = net - landedCents - fixedCents - mulDivRound(net, pct, 10000);
+  return BigInt(contribution) * 10000n >= BigInt(minContribution) * BigInt(net);
+}
+
+function findFloor(
+  landedCents: number,
+  fixedCents: number,
+  pct: Bps,
+  minContribution: Bps,
+): number | null {
+  const rate = pct + minContribution;
+  if (rate >= 10000) return null;
+  const divisor = BigInt(10000 - rate);
+  const base = BigInt(landedCents + fixedCents) * 10000n;
+  const guess = toSafeInteger((base + divisor - 1n) / divisor); // ceil, ignores fee rounding
+  // Fee rounding can move the true floor by up to ~1 / (1 - rate) cents; search a window around the guess.
+  const window = Math.ceil(10000 / (10000 - rate)) + 2;
+  const meets = (cents: number) =>
+    meetsMinimum(cents, landedCents, fixedCents, pct, minContribution);
+  for (let f = Math.max(1, guess - window); f <= guess + window; f++) {
+    if (meets(f)) {
+      let lowest = f;
+      while (lowest > 1 && meets(lowest - 1)) lowest--;
+      return lowest;
+    }
+  }
+  throw new Error('floor price search failed');
 }
 
 export function skuPricing(input: {
@@ -151,6 +193,23 @@ export function skuPricing(input: {
         }
       : null;
 
+  let floorPrice: Money | null = null;
+  let floorExplanation: string | null = null;
+  let maxDiscount: Money | null = null;
+  if (landed.cents === 0) {
+    floorExplanation = 'Add cost data to calculate a floor price.';
+  } else {
+    const floor = findFloor(landed.cents, fixed.cents, pct, config.minContribution);
+    if (floor === null) {
+      floorExplanation =
+        'Fees and your minimum profit add up to 100% of the price or more, so no price reaches the minimum. Lower the fees or the minimum.';
+      maxDiscount = money(0, currency);
+    } else {
+      floorPrice = money(floor, currency);
+      if (price.cents > 0) maxDiscount = money(Math.max(0, price.cents - floor), currency);
+    }
+  }
+
   return {
     currency,
     netPrice,
@@ -163,5 +222,8 @@ export function skuPricing(input: {
     idealRange,
     status,
     warning,
+    floorPrice,
+    floorExplanation,
+    maxDiscount,
   };
 }

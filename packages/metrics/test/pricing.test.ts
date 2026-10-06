@@ -199,3 +199,90 @@ describe('skuPricing: validation', () => {
     ).toThrow(RangeError);
   });
 });
+
+const fulfillmentFull = {
+  fixed: { outboundShipping: money(500), pickPack: money(200), paymentFee: money(30) },
+  percentOfPrice: { paymentFee: 290, returnsAllowance: 200 },
+};
+
+describe('skuPricing: floor price and maximum discount', () => {
+  const base = { price: money(5000), landed: money(2000), fulfillment: fulfillmentFull };
+  it('finds the lowest price that keeps the minimum contribution', () => {
+    const r = skuPricing(base);
+    expect(r.floorPrice).toEqual(money(3409));
+    expect(r.floorExplanation).toBeNull();
+  });
+  it('allows a discount down to the floor, and no further', () => {
+    const r = skuPricing(base);
+    expect(r.maxDiscount).toEqual(money(1591));
+    const atMax = skuPricing({ ...base, discount: money(1591) });
+    const pastMax = skuPricing({ ...base, discount: money(1592) });
+    expect(atMax.contributionBps).toBe(1502);
+    expect(pastMax.contributionBps).toBe(1499);
+  });
+  it('has a zero maximum discount when the price is already at or below the floor', () => {
+    expect(skuPricing({ ...base, price: money(3409) }).maxDiscount).toEqual(money(0));
+    expect(skuPricing({ ...base, price: money(3000) }).maxDiscount).toEqual(money(0));
+  });
+  it('has no floor when percentage fees plus the minimum leave no room', () => {
+    const r = skuPricing({
+      price: money(5000),
+      landed: money(2000),
+      fulfillment: { percentOfPrice: { paymentFee: 9000 } }, // 90% + 15% minimum >= 100%
+    });
+    expect(r.floorPrice).toBeNull();
+    expect(r.floorExplanation).toContain('no price reaches the minimum');
+    expect(r.maxDiscount).toEqual(money(0));
+  });
+  it('has no floor or maximum discount when cost is unknown', () => {
+    const r = skuPricing({ price: money(5000), landed: money(0), fulfillment: fulfillmentFull });
+    expect(r.floorPrice).toBeNull();
+    expect(r.floorExplanation).toBe('Add cost data to calculate a floor price.');
+    expect(r.maxDiscount).toBeNull();
+  });
+  it('has no maximum discount for a zero price', () => {
+    expect(skuPricing({ price: money(0), landed: money(2000) }).maxDiscount).toBeNull();
+  });
+  it('honours a custom minimum contribution', () => {
+    const r = skuPricing({ ...base, config: { minContribution: 0 } });
+    // smallest price with contribution >= 0: (2000 + 730) / (1 - 4.9%) ~ 2870.6
+    expect(r.floorPrice?.cents).toBeGreaterThanOrEqual(2870);
+    expect(r.floorPrice?.cents).toBeLessThanOrEqual(2872);
+  });
+});
+
+describe('skuPricing: the floor price agrees with the contribution reported at that price', () => {
+  const landeds = [500, 2000, 12345];
+  const shippings = [0, 730];
+  const pcts = [0, 490, 2900];
+  const mins = [0, 1500, 3000];
+  for (const landed of landeds) {
+    for (const ship of shippings) {
+      for (const pct of pcts) {
+        for (const minC of mins) {
+          it(`landed ${landed}, fixed ${ship}, pct ${pct}, min ${minC}`, () => {
+            const fulfillment = {
+              fixed: { outboundShipping: money(ship) },
+              percentOfPrice: { paymentFee: pct },
+            };
+            const config = { minContribution: minC };
+            const r = skuPricing({
+              price: money(100000),
+              landed: money(landed),
+              fulfillment,
+              config,
+            });
+            const f = r.floorPrice;
+            expect(f).not.toBeNull();
+            const at = (cents: number) =>
+              skuPricing({ price: money(cents), landed: money(landed), fulfillment, config });
+            const meets = (cents: number) => at(cents).contribution.cents * 10000 >= minC * cents;
+            expect(meets(f!.cents)).toBe(true);
+            if (f!.cents > 1) expect(meets(f!.cents - 1)).toBe(false);
+            expect(r.maxDiscount).toEqual(money(100000 - f!.cents));
+          });
+        }
+      }
+    }
+  }
+});

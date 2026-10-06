@@ -21,9 +21,39 @@ describe('sanitizeMessage', () => {
     expect(out).not.toContain('A'.repeat(40));
   });
   it('caps the length, accepts non-strings and never throws', () => {
-    expect(sanitizeMessage('x'.repeat(2000)).length).toBe(500);
+    expect(sanitizeMessage('word '.repeat(500)).length).toBe(500);
+    expect(
+      sanitizeMessage({
+        message: {
+          toString: () => {
+            throw new Error('x');
+          },
+        },
+      }),
+    ).toBeTypeOf('string');
     expect(sanitizeMessage(new Error('boom'))).toBe('boom');
     expect(sanitizeMessage({ a: 1 })).toBe('[object Object]');
     expect(sanitizeMessage(undefined)).toBe('undefined');
+  });
+  it('redacts JSON-style and quoted secrets', () => {
+    const json = sanitizeMessage('{"access_token":"abc","client_secret": "s3cr3t", "code":"q1"}');
+    expect(json).not.toMatch(/abc|s3cr3t|q1/);
+    const quoted = sanitizeMessage('password: "two words" then ok');
+    expect(quoted).not.toMatch(/two|words/);
+    expect(quoted).toContain('then ok');
+    expect(sanitizeMessage("token='a b c' end")).not.toMatch(/a b c/);
+  });
+  it('redacts access_token inside a URL query, base64 bearers and hex hmacs', () => {
+    expect(sanitizeMessage('GET /x?access_token=abc123 failed')).not.toContain('abc123');
+    expect(sanitizeMessage('Authorization: Bearer YWJjZGVm+/ghi==')).not.toContain('YWJjZGVm');
+    const hmac = 'a1b2c3d4'.repeat(8);
+    expect(sanitizeMessage(`bad ${hmac} sig`)).not.toContain(hmac);
+  });
+  it('redacts long opaque runs regardless of case', () => {
+    expect(sanitizeMessage('A'.repeat(40))).not.toContain('AAAA');
+    expect(sanitizeMessage('a'.repeat(40))).not.toContain('aaaa');
+  });
+  it('redacts uppercase Shopify token prefixes', () => {
+    expect(sanitizeMessage('SHPAT_0123abc')).not.toMatch(/SHPAT_0123/);
   });
 });

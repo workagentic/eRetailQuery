@@ -7,3 +7,4 @@ export * from './sinks/util';
 export * from './sinks/locations';
 export * from './sinks/products';
 export * from './sinks/inventory';
+export * from './sinks/orders';

@@ -58,9 +58,9 @@ Success criteria:
 ### 4.2 `pricing.ts` (CLAUDE.md §7.1)
 
 Types:
-- `CostComponent = { componentType: string; amountCents: number; currency: string; effectiveFrom: string; effectiveTo: string | null }` (per-unit only; the caller converts per-batch costs to per-unit before calling).
+- `CostComponent = { componentType: string; amountCents: number; currency: string; effectiveFrom: string; effectiveTo: string | null; perUnit?: boolean }` (per-unit only; `perUnit: false` throws `RangeError`, so the caller converts per-batch costs to per-unit before calling; dates must be `YYYY-MM-DD`).
 - `FulfillmentAssumptions = { fixed: { pickPack?: Money; outboundShipping?: Money; paymentFee?: Money; fbaFee?: Money }; percentOfPrice: { paymentFee?: Bps; marketplaceFee?: Bps; returnsAllowance?: Bps } }`
-- `PricingConfig = { targetMarkupLow: Bps; targetMarkupHigh: Bps; minContribution: Bps }` with `DEFAULT_PRICING_CONFIG = { targetMarkupLow: 5000, targetMarkupHigh: 10000, minContribution: 1500 }`.
+- `PricingConfig = { targetMarkupLow: Bps; targetMarkupHigh: Bps; minContribution: Bps }` with config validation (`RangeError` on invalid values; `undefined` keys fall back to defaults) and `DEFAULT_PRICING_CONFIG = { targetMarkupLow: 5000, targetMarkupHigh: 10000, minContribution: 1500 }`.
 
 Functions:
 - `landedCost(components: CostComponent[], asOf: string, currency?: string): Money` — sums components where `effectiveFrom <= asOf` and (`effectiveTo` is null or `asOf < effectiveTo`). Empty list gives zero. Components in another currency throw.
@@ -85,7 +85,7 @@ Measures:
 Flags:
 - `AdDay = { date: string; spend: Money; impressions: number; clicks: number; conversions: number; revenue: Money }`
 - `AdFlagConfig = { minSpendCents: number; minImpressions: number; winningMultiple: number; declineThreshold: Bps; genericBands: { poor: number; good: number } }` with defaults: `minSpendCents` 5000 (interpreted in the currency of the days), 1,000 impressions, winning multiple 1.5, decline threshold 2000 bps (20%), generic bands 1.5 and 3.
-- `classifyAd(input: { days: AdDay[]; contributionBeforeAds: Bps | null }, config?: Partial<AdFlagConfig>): AdFlag`. `days` holds up to 14 days, the most recent 7 and the 7 before them; fewer days are allowed and the week-over-week trend is then `null`.
+- `classifyAd(input: { days: AdDay[]; contributionBeforeAds: Bps | null }, config?: Partial<AdFlagConfig>): AdFlag`. `days` must be consecutive calendar dates (no gaps, no duplicates, otherwise `RangeError`; callers zero-fill missing days). The recent window is the last 7 days and the previous window the 7 before them; fewer days are allowed and the week-over-week trend is then `null`. Config keys set to `undefined` fall back to defaults and invalid config values throw `RangeError`.
 - `AdFlag = { code: 'learning' | 'losing' | 'watch' | 'winning'; roas: number | null; breakEven: number | null; trend: Bps | null; estimatedDailyLoss: Money | null; usedGenericBands: boolean; facts; explanation }`.
 
 Rules, evaluated in this order:
@@ -99,7 +99,7 @@ Rules, evaluated in this order:
 
 - `salesVelocity(input: { units7: number; units30: number; units90: number; weights?: { w7: number; w30: number; w90: number } }): number` — weighted average of daily rates (units divided by 7, 30 and 90); default weights 0.5, 0.3, 0.2; weights must sum to 1 (else `RangeError`).
 - `daysOfCover(available: number, velocity: number): number | null` — null when velocity is zero; `available` is on hand minus reserved and may not be negative (negative throws).
-- `stockFlags(input: { available: number; velocity: number; unitsSold90: number; reorderPoint?: number; leadTimeDays?: number; bufferDays?: number; overstockDays?: number }): StockFlags` returning `{ low, overstock, dead }`, each `{ fired: boolean; explanation: string }`:
+- `stockFlags(input: { available: number; velocity: number; unitsSold90: number; reorderPoint?: number; leadTimeDays?: number; bufferDays?: number; overstockDays?: number }): StockFlags` returning `{ facts, low, overstock, dead }` (`facts` holds the inputs and thresholds used; optional numeric inputs must be finite and non-negative), where each flag is `{ fired: boolean; explanation: string }`:
   - low: days of cover below `leadTimeDays + bufferDays` (`bufferDays` defaults to `DEFAULT_BUFFER_DAYS = 7`; the threshold is `UNKNOWN_LEAD_TIME_DAYS = 14` in total when lead time is unknown) or `available <= reorderPoint`;
   - overstock: days of cover above 180;
   - dead: `unitsSold90 === 0` and `available > 0`.

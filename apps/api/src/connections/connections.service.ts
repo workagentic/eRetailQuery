@@ -7,9 +7,11 @@ import {
   exchangeCodeForToken,
   isValidShopDomain,
   normalizeShopInput,
+  parseWebhookHeaders,
   registerWebhooks,
   sanitizeMessage,
   verifyOAuthQuery,
+  verifyWebhookSignature,
   type HttpClient,
   type ShopifyConfig,
 } from '@erq/connectors';
@@ -20,6 +22,7 @@ import {
   insertAudit,
   oauthStates,
   storeConnections,
+  webhookEvents,
   type TenantDb,
 } from '@erq/db';
 import type { ConnectionDto, InstallResponse, KeyProvider, ShopifyErrorCode } from '@erq/shared';
@@ -27,7 +30,14 @@ import { ApiError } from '../common/api-error';
 import { APP_CONFIG, LOGGER } from '../config/config.module';
 import type { Env } from '../config/env';
 import { TENANT_DB } from '../db/db.module';
-import { CONNECTIONS_API, HTTP_CLIENT, KEY_PROVIDER, SHOPIFY_CONFIG } from './tokens';
+import {
+  CONNECTIONS_API,
+  HTTP_CLIENT,
+  KEY_PROVIDER,
+  SHOPIFY_CONFIG,
+  WEBHOOK_QUEUE_PORT,
+} from './tokens';
+import type { WebhookQueue } from './webhook-queue';
 
 @Injectable()
 export class ConnectionsService {
@@ -39,6 +49,7 @@ export class ConnectionsService {
     @Inject(KEY_PROVIDER) private readonly keyProvider: KeyProvider | null,
     @Inject(APP_CONFIG) private readonly env: Env,
     @Inject(LOGGER) private readonly logger: Logger,
+    @Inject(WEBHOOK_QUEUE_PORT) private readonly webhookQueue: WebhookQueue,
   ) {}
 
   private redirect(params: Record<string, string>): string {
@@ -233,5 +244,67 @@ export class ConnectionsService {
         entityId: id,
       });
     });
+  }
+
+  /**
+   * Public webhook receiver. Authorized only by the HMAC over the raw body bytes.
+   * Never log the payload, body or signature header.
+   */
+  async receiveWebhook(
+    rawBody: Buffer | undefined,
+    headers: Record<string, string | string[] | undefined>,
+  ): Promise<'stored' | 'duplicate' | 'unknown_shop'> {
+    const cfg = this.requireConfig();
+    const invalid = () => new ApiError(401, 'invalid_signature', 'Invalid signature');
+    if (!rawBody) throw invalid();
+    const sig = headers['x-shopify-hmac-sha256'];
+    if (typeof sig !== 'string' || !verifyWebhookSignature(rawBody, sig, cfg.apiSecret)) {
+      throw invalid();
+    }
+    const parsed = parseWebhookHeaders(headers);
+    if (!parsed) throw invalid();
+    let payload: unknown;
+    try {
+      payload = JSON.parse(rawBody.toString('utf8'));
+    } catch {
+      throw new ApiError(400, 'invalid_payload', 'Webhook body is not valid JSON');
+    }
+    const conn = await this.api.findStoreConnection('shopify', parsed.shop);
+    if (!conn) {
+      this.logger.info(
+        { shop: parsed.shop, topic: parsed.topic },
+        'shopify webhook for unknown shop',
+      );
+      return 'unknown_shop';
+    }
+    const { orgId } = conn;
+    const inserted = await this.db.withTenant(orgId, (tx) =>
+      tx
+        .insert(webhookEvents)
+        .values({
+          orgId,
+          storeConnectionId: conn.connectionId,
+          topic: parsed.topic,
+          externalEventId: parsed.webhookId,
+          payload,
+        })
+        .onConflictDoNothing({
+          target: [
+            webhookEvents.orgId,
+            webhookEvents.storeConnectionId,
+            webhookEvents.externalEventId,
+          ],
+        })
+        .returning({ id: webhookEvents.id }),
+    );
+    const row = inserted[0];
+    if (!row) return 'duplicate';
+    try {
+      await this.webhookQueue.enqueue({ orgId, eventId: row.id });
+    } catch (err) {
+      // The row stays 'received'; the worker sweep picks it up.
+      this.logger.warn({ err: sanitizeMessage(err), eventId: row.id }, 'webhook enqueue failed');
+    }
+    return 'stored';
   }
 }

@@ -1,6 +1,15 @@
-import { Controller, Get, Query, Res } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  HttpCode,
+  Post,
+  Query,
+  Req,
+  Res,
+  type RawBodyRequest,
+} from '@nestjs/common';
 import { ApiExcludeController } from '@nestjs/swagger';
-import type { Response } from 'express';
+import type { Request, Response } from 'express';
 import { ConnectionsService } from './connections.service';
 
 @ApiExcludeController()
@@ -15,5 +24,13 @@ export class ShopifyPublicController {
     @Res() res: Response,
   ): Promise<void> {
     res.redirect(302, await this.connections.completeInstall(query));
+  }
+
+  // Public by design: authorized only by Shopify's HMAC over the raw request body.
+  @Post('webhooks/shopify')
+  @HttpCode(200)
+  async webhook(@Req() req: RawBodyRequest<Request>): Promise<{ ok: true }> {
+    await this.connections.receiveWebhook(req.rawBody, req.headers);
+    return { ok: true };
   }
 }

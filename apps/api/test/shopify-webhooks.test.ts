@@ -131,6 +131,7 @@ describe('POST /webhooks/shopify', () => {
       (await post(body, hdr(body, { 'x-shopify-shop-domain': 'nobody.myshopify.com' }))).status,
     ).toBe(200);
     expect((await events()).length).toBe(before);
+    expect(queue.jobs).toHaveLength(0);
     expect((await post(body, without(hdr(body), 'x-shopify-topic'))).status).toBe(401);
   });
   it('stores events for a disconnected connection (privacy webhooks arrive after uninstall)', async () => {
@@ -160,5 +161,55 @@ describe('POST /webhooks/shopify', () => {
     const before = (await events()).length;
     expect((await post(body, hdr(body))).status).toBe(400);
     expect((await events()).length).toBe(before);
+  });
+  it('rejects a repeated hmac header', async () => {
+    const body = '{"id":7}';
+    const before = (await events()).length;
+    const h = hdr(body);
+    const res = await request(t.app.getHttpServer())
+      .post('/webhooks/shopify')
+      .set('content-type', 'application/json')
+      .set(h)
+      // superagent's typings only allow a string; Node sends an array value as a repeated header
+      .set('x-shopify-hmac-sha256', [
+        h['x-shopify-hmac-sha256'],
+        h['x-shopify-hmac-sha256'],
+      ] as unknown as string)
+      .send(body);
+    expect(res.status).toBe(401);
+    expect((await events()).length).toBe(before);
+  });
+  it('accepts a signed payload of about 500kb', async () => {
+    const body = JSON.stringify({ id: 8, note: 'x'.repeat(500_000) });
+    const headers = hdr(body);
+    expect((await post(body, headers)).status).toBe(200);
+    expect(
+      (await events()).filter((e) => e.external_event_id === headers['x-shopify-webhook-id']),
+    ).toHaveLength(1);
+  });
+  it('still rejects an oversize body on other routes with 413', async () => {
+    const res = await request(t.app.getHttpServer())
+      .post('/orgs')
+      .set('content-type', 'application/json')
+      .send(JSON.stringify({ name: 'x'.repeat(200_000) }));
+    expect(res.status).toBe(413);
+  });
+});
+
+describe('POST /webhooks/shopify without Shopify configuration', () => {
+  it('answers 503 shopify_not_configured', async () => {
+    const bare = await createTestApp();
+    try {
+      const body = '{"id":1}';
+      const res = await request(bare.app.getHttpServer())
+        .post('/webhooks/shopify')
+        .set('content-type', 'application/json')
+        .set(hdr(body))
+        .send(body);
+      expect(res.status).toBe(503);
+      expect(res.body.error.code).toBe('shopify_not_configured');
+    } finally {
+      await bare.close();
+    }
   });
 });

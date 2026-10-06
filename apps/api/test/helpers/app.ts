@@ -3,6 +3,7 @@ import { Test } from '@nestjs/testing';
 import type { INestApplication, Type } from '@nestjs/common';
 import { startTestDatabase, type TestDatabase } from '@erq/db/testing';
 import { generateKeyPair, SignJWT, type KeyLike } from 'jose';
+import { APP_CREATE_OPTIONS, configureApp } from '../../src/app.config';
 import { AppModule } from '../../src/app.module';
 import { createJoseVerifier, JWT_VERIFIER } from '../../src/auth/jwt-verifier';
 import { loadEnv } from '../../src/config/env';
@@ -53,7 +54,8 @@ export async function createTestApp(
       .useValue(createJoseVerifier({ key: publicKey, issuer: ISSUER, algorithms: ['ES256'] }));
     for (const o of opts.overrides ?? []) builder.overrideProvider(o.provide).useValue(o.useValue);
     const moduleRef = await builder.compile();
-    const app = moduleRef.createNestApplication({ rawBody: true });
+    const app = moduleRef.createNestApplication(APP_CREATE_OPTIONS);
+    configureApp(app);
     await app.init();
     return {
       app,

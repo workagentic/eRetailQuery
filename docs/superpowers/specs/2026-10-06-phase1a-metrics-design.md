@@ -70,9 +70,9 @@ Functions:
   - `contribution: Money` and `contributionBps: Bps | null` on the net price;
   - `idealRange: { low: Money; high: Money } | null` (`landed × (1 + markup)`, null when landed is zero);
   - `status: { code: 'underpriced' | 'healthy' | 'premium' | 'unknown'; explanation: string }` — underpriced says "Raise to at least $X"; premium says "Check that it is still selling"; unknown when there is no cost data;
-  - `floorPrice: Money | null` — the lowest price with contribution at or above `minContribution`: `ceil((landed + fixed) / (1 - pctFees - minContribution))`; null with `floorExplanation` when the percentage fees plus the minimum leave no room (denominator at or below zero);
+  - `floorPrice: Money | null` — the lowest price with contribution at or above `minContribution`: `ceil((landed + fixed) / (1 - pctFees - minContribution))`; null with `floorExplanation` when the percentage fees plus the minimum leave no room (denominator at or below zero), and null with a `floorExplanation` asking for cost data when landed cost is zero (cost unknown);
   - `warning: { code: 'markup_ok_contribution_negative'; explanation: string } | null`;
-  - `maxDiscount: Money | null` — the largest discount keeping contribution at or above `minContribution`. It equals `price − floorPrice` (percentage fees apply to the discounted price, so the floor price is the lowest acceptable net price). It is zero when the price is already at or below the floor, zero when `floorPrice` is null (no discount can reach the minimum), and null when price or cost is unknown.
+  - `maxDiscount: Money | null` — the largest discount keeping contribution at or above `minContribution`. It equals `price − floorPrice` (percentage fees apply to the discounted price, so the floor price is the lowest acceptable net price). It is zero when the price is already at or below the floor, a zero amount when no price can reach the minimum (fees plus the minimum leave no room), and null when landed cost is zero (cost unknown) or the price is zero.
 
 ### 4.3 `ads.ts` (CLAUDE.md §7.3)
 
@@ -84,14 +84,14 @@ Measures:
 
 Flags:
 - `AdDay = { date: string; spend: Money; impressions: number; clicks: number; conversions: number; revenue: Money }`
-- `AdFlagConfig = { minSpend: Money; minImpressions: number; winningMultiple: number; declineThreshold: Bps; genericBands: { poor: number; good: number } }` with defaults: min spend $50, 1,000 impressions, winning multiple 1.5, decline threshold 2000 bps (20%), generic bands 1.5 and 3.
+- `AdFlagConfig = { minSpendCents: number; minImpressions: number; winningMultiple: number; declineThreshold: Bps; genericBands: { poor: number; good: number } }` with defaults: `minSpendCents` 5000 (interpreted in the currency of the days), 1,000 impressions, winning multiple 1.5, decline threshold 2000 bps (20%), generic bands 1.5 and 3.
 - `classifyAd(input: { days: AdDay[]; contributionBeforeAds: Bps | null }, config?: Partial<AdFlagConfig>): AdFlag`. `days` holds up to 14 days, the most recent 7 and the 7 before them; fewer days are allowed and the week-over-week trend is then `null`.
 - `AdFlag = { code: 'learning' | 'losing' | 'watch' | 'winning'; roas: number | null; breakEven: number | null; trend: Bps | null; estimatedDailyLoss: Money | null; usedGenericBands: boolean; facts; explanation }`.
 
 Rules, evaluated in this order:
-1. **Learning:** trailing-7-day spend below `minSpend` or impressions below `minImpressions`. Never flagged losing.
+1. **Learning:** trailing-7-day spend below `minSpendCents` or impressions below `minImpressions`. Never flagged losing.
 2. **Generic bands** (when `contributionBeforeAds` is null or not positive): ROAS below the poor band is `losing`, from the poor band up to the good band is `watch`, above the good band is `winning`; `usedGenericBands: true` and the explanation asks the owner to add costs for accurate flags. Estimated daily loss is `null` in this mode.
-3. **Losing:** trailing-7-day ROAS below break-even. `estimatedDailyLoss = max(0, spend - revenue × contributionBeforeAds) / 7`, as Money.
+3. **Losing:** trailing-7-day ROAS below break-even. `estimatedDailyLoss = max(0, spend - revenue × contributionBeforeAds) / days`, as Money, where `days` is the number of days in the trailing window (7 when a full week exists).
 4. **Watch:** ROAS at least break-even but below `winningMultiple × break-even`, or week-over-week ROAS change below `-declineThreshold`.
 5. **Winning:** ROAS at least `winningMultiple × break-even` and trend not below `-declineThreshold`.
 
@@ -100,7 +100,7 @@ Rules, evaluated in this order:
 - `salesVelocity(input: { units7: number; units30: number; units90: number; weights?: { w7: number; w30: number; w90: number } }): number` — weighted average of daily rates (units divided by 7, 30 and 90); default weights 0.5, 0.3, 0.2; weights must sum to 1 (else `RangeError`).
 - `daysOfCover(available: number, velocity: number): number | null` — null when velocity is zero; `available` is on hand minus reserved and may not be negative (negative throws).
 - `stockFlags(input: { available: number; velocity: number; unitsSold90: number; reorderPoint?: number; leadTimeDays?: number; bufferDays?: number; overstockDays?: number }): StockFlags` returning `{ low, overstock, dead }`, each `{ fired: boolean; explanation: string }`:
-  - low: days of cover below `leadTimeDays + bufferDays` (14 total when lead time is unknown) or `available <= reorderPoint`;
+  - low: days of cover below `leadTimeDays + bufferDays` (`bufferDays` defaults to `DEFAULT_BUFFER_DAYS = 7`; the threshold is `UNKNOWN_LEAD_TIME_DAYS = 14` in total when lead time is unknown) or `available <= reorderPoint`;
   - overstock: days of cover above 180;
   - dead: `unitsSold90 === 0` and `available > 0`.
 - `stockByLocation(levels: { locationId: string; onHand: number; reserved: number }[]): { byLocation: { locationId: string; available: number }[]; totalAvailable: number }` — available is on hand minus reserved, floored at zero per location.

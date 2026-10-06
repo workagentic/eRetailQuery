@@ -20,6 +20,8 @@ export interface ConnectionsApi {
     olderThan: Date,
     limit: number,
   ): Promise<{ orgId: string; eventId: string }[]>;
+  /** Used only by the worker's shop/redact handler. Never expose through a route. */
+  purgeStoreConnection(orgId: string, connectionId: string): Promise<void>;
 }
 
 /** Wrappers for the SECURITY DEFINER functions that run before any org context exists. Never expose these through a route. */
@@ -51,6 +53,9 @@ export function createConnectionsApi(pool: Pool): ConnectionsApi {
         [olderThan, limit],
       );
       return rows.map((r) => ({ orgId: r.o_org_id, eventId: r.o_event_id }));
+    },
+    async purgeStoreConnection(orgId, connectionId) {
+      await pool.query('select app_purge_store_connection($1, $2)', [orgId, connectionId]);
     },
   };
 }

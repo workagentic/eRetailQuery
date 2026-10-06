@@ -2,15 +2,19 @@ import { UnrecoverableError, Worker, type ConnectionOptions, type Queue } from '
 import { WEBHOOK_QUEUE, webhookJobSchema, type WebhookJob } from '@erq/shared';
 
 export interface WebhookEnqueuer {
-  enqueue(job: WebhookJob): Promise<void>;
+  /** A retryBucket makes a distinct job id so a re-add is not dropped by a retained finished job. */
+  enqueue(job: WebhookJob, opts?: { retryBucket?: string }): Promise<void>;
 }
 
 /** Same deterministic job id and options as the API's queue, so a sweep never duplicates a live job. BullMQ ids may not contain ':'. */
 export class BullMqWebhookEnqueuer implements WebhookEnqueuer {
   constructor(private readonly queue: Queue) {}
-  async enqueue(job: WebhookJob): Promise<void> {
+  async enqueue(job: WebhookJob, opts: { retryBucket?: string } = {}): Promise<void> {
     await this.queue.add('webhook', job, {
-      jobId: `${job.orgId}_${job.eventId}`,
+      jobId:
+        opts.retryBucket === undefined
+          ? `${job.orgId}_${job.eventId}`
+          : `${job.orgId}_${job.eventId}_r${opts.retryBucket}`,
       attempts: 5,
       backoff: { type: 'exponential', delay: 5_000 },
       removeOnComplete: { count: 1_000 },

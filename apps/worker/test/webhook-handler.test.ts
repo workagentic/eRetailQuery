@@ -202,7 +202,7 @@ describe('processWebhookEvent', () => {
     expect(failed.error).not.toMatch(/shpat_/);
     expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: id })).toBe('processed');
   });
-  it('reclaims an event stuck in processing for over 15 minutes but not a fresh one', async () => {
+  it('reclaims an event stuck in processing for over 10 minutes but not a fresh one', async () => {
     const stale = await addEvent('products/update', { status: 'processing', ageMinutes: 30 });
     const fresh = await addEvent('products/update', { status: 'processing', ageMinutes: 1 });
     expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: stale })).toBe('deferred');
@@ -223,5 +223,25 @@ describe('processWebhookEvent', () => {
       }),
     ).toBe('skipped');
     expect((await status(id)).status).toBe('received');
+  });
+  it('rethrows the original error when recording the failure also fails', async () => {
+    const id = await addEvent('shop/redact', { connection: OTHER });
+    let calls = 0;
+    const flaky: TenantDb = {
+      ...db,
+      withTenant: ((orgId: string, fn: never) => {
+        if (++calls >= 2) throw new Error('mark failed');
+        return db.withTenant(orgId, fn);
+      }) as TenantDb['withTenant'],
+    };
+    const broken: ConnectionsApi = {
+      ...connections,
+      purgeStoreConnection: async () => {
+        throw new Error('original boom');
+      },
+    };
+    await expect(
+      processWebhookEvent({ db: flaky, connections: broken }, { orgId: ORG, eventId: id }),
+    ).rejects.toThrow('original boom');
   });
 });

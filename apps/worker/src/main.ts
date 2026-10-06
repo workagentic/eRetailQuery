@@ -2,7 +2,7 @@ import path from 'node:path';
 import { Queue } from 'bullmq';
 import dotenv from 'dotenv';
 import IORedis from 'ioredis';
-import { ConnectorRegistry } from '@erq/connectors';
+import { ConnectorRegistry, sanitizeMessage } from '@erq/connectors';
 import { createConnectionsApi, createTenantDb, type TenantDb } from '@erq/db';
 import { createLogger, EnvKeyProvider, WEBHOOK_QUEUE } from '@erq/shared';
 import type { SyncDeps } from '@erq/sync';
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
     // Log the job name only: webhook payloads are tenant data.
     webhookWorker.on('completed', (job) => log.info({ job: job.name }, 'webhook job completed'));
     webhookWorker.on('failed', (job, err) =>
-      log.error({ job: job?.name, err: err.message }, 'webhook job failed'),
+      log.error({ job: job?.name, err: sanitizeMessage(err) }, 'webhook job failed'),
     );
     await scheduleWebhookSweep(webhookQueue);
   } else {

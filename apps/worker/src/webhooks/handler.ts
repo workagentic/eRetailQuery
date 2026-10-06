@@ -30,7 +30,8 @@ const DATA_TOPICS = new Set([
   'inventory_levels/update',
 ]);
 const PRIVACY_TOPICS = new Set(['customers/data_request', 'customers/redact']);
-const STALE_PROCESSING_MS = 15 * 60_000;
+/** Age after which an unfinished event is retried: a `processing` claim is reclaimable and the sweep re-enqueues it. */
+export const STALE_EVENT_MS = 10 * 60_000;
 
 type EventStatus = 'processed' | 'deferred' | 'ignored' | 'failed';
 
@@ -65,7 +66,7 @@ export async function processWebhookEvent(
   const now = deps.now ?? (() => new Date());
   const { orgId, eventId } = job;
   const claimedAt = now();
-  const staleBefore = new Date(claimedAt.getTime() - STALE_PROCESSING_MS);
+  const staleBefore = new Date(claimedAt.getTime() - STALE_EVENT_MS);
 
   const claimed = await deps.db.withTenant(orgId, async (tx) => {
     const rows = await tx
@@ -102,19 +103,21 @@ export async function processWebhookEvent(
     return await deps.db.withTenant(orgId, async (tx) => {
       const at = now();
       if (topic === 'app/uninstalled') {
-        await tx
+        const updated = await tx
           .update(storeConnections)
           .set({ status: 'disconnected', encryptedCredentials: null })
-          .where(
-            and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, storeConnectionId)),
-          );
-        await insertAudit(tx, {
-          orgId,
-          actorUserId: null,
-          action: 'connection.uninstalled',
-          entityType: 'store_connection',
-          entityId: storeConnectionId,
-        });
+          .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, storeConnectionId)))
+          .returning({ id: storeConnections.id });
+        // A connection that is already gone needs no audit row.
+        if (updated.length > 0) {
+          await insertAudit(tx, {
+            orgId,
+            actorUserId: null,
+            action: 'connection.uninstalled',
+            entityType: 'store_connection',
+            entityId: storeConnectionId,
+          });
+        }
         await setStatus(tx, orgId, eventId, 'processed', at);
         return 'processed' as const;
       }

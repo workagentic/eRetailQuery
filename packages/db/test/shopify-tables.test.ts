@@ -112,18 +112,40 @@ describe('webhook_events', () => {
       cause: { message: expect.stringMatching(/foreign key constraint/) },
     });
   });
-  it('lists only old, still-received events, oldest first, across tenants', async () => {
+  it('lists old received and stale processing events, oldest first, across tenants', async () => {
     await owner.query(`delete from webhook_events`);
     await owner.query(
       `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload, received_at, status) values
         ($1, $1, 't', 'old-a', '{}', now() - interval '1 hour', 'received'),
         ($2, $2, 't', 'old-b', '{}', now() - interval '2 hours', 'received'),
         ($1, $1, 't', 'fresh', '{}', now(), 'received'),
-        ($1, $1, 't', 'done', '{}', now() - interval '3 hours', 'processed')`,
+        ($1, $1, 't', 'done', '{}', now() - interval '3 hours', 'processed'),
+        ($1, $1, 't', 'deferred', '{}', now() - interval '3 hours', 'deferred'),
+        ($1, $1, 't', 'failed', '{}', now() - interval '3 hours', 'failed')`,
       [A, B],
     );
+    await owner.query(
+      `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload, status, updated_at) values
+        ($1, $1, 't', 'stuck', '{}', 'processing', now() - interval '30 minutes'),
+        ($1, $1, 't', 'busy', '{}', 'processing', now())`,
+      [A],
+    );
+    await owner.query(
+      `update webhook_events set updated_at = now() - interval '4 hours' where status in ('processed','deferred','failed')`,
+    );
     const stale = await api.listStaleWebhookEvents(new Date(Date.now() - 10 * 60_000), 10);
-    expect(stale.map((e) => e.orgId)).toEqual([B, A]);
+    expect(stale.map((e) => e.orgId)).toEqual([B, A, A]);
+    const ids = (
+      await owner.query(
+        `select id from webhook_events where external_event_id in ('old-a','stuck')`,
+      )
+    ).rows.map((r) => r.id);
+    expect(
+      stale
+        .slice(1)
+        .map((e) => e.eventId)
+        .sort(),
+    ).toEqual(ids.sort());
     expect(await api.listStaleWebhookEvents(new Date(Date.now() - 10 * 60_000), 1)).toHaveLength(1);
   });
 });

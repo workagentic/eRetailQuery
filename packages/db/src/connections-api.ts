@@ -16,6 +16,7 @@ export interface ConnectionsApi {
     platform: StorePlatformName,
     externalAccountId: string,
   ): Promise<{ orgId: string; connectionId: string; status: ConnectionStatusName } | null>;
+  /** Events still `received` past the cutoff (never queued) or stuck in `processing` past it (worker crashed), oldest first. */
   listStaleWebhookEvents(
     olderThan: Date,
     limit: number,

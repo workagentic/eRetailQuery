@@ -113,6 +113,13 @@
       "when": 1791319527923,
       "tag": "0015_shopify_purge",
       "breakpoints": true
+    },
+    {
+      "idx": 16,
+      "version": "7",
+      "when": 1791322918231,
+      "tag": "0016_shopify_stale_processing",
+      "breakpoints": true
     }
   ]
 }

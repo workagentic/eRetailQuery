@@ -38,6 +38,9 @@ describe('webhook queue (Redis testcontainer)', () => {
     await enqueuer.enqueue({ orgId: ORG, eventId: EVENT });
     await enqueuer.enqueue({ orgId: ORG, eventId: EVENT });
     expect(await queue.count()).toBe(1);
+    // A sweep re-add uses a per-window job id and is not dropped by the retained original.
+    await enqueuer.enqueue({ orgId: ORG, eventId: EVENT }, { retryBucket: '7' });
+    expect(await queue.count()).toBe(2);
     const worker = createWebhookWorker(
       { handle: async (j) => void handled.push(j), sweep: async () => 0 },
       connection!,
@@ -45,7 +48,8 @@ describe('webhook queue (Redis testcontainer)', () => {
     try {
       const job = (await queue.getJobs(['waiting', 'active', 'delayed']))[0]!;
       await job.waitUntilFinished(events, 10_000);
-      expect(handled).toEqual([{ orgId: ORG, eventId: EVENT }]);
+      await expect.poll(() => handled.length, { timeout: 10_000 }).toBe(2);
+      expect(handled[0]).toEqual({ orgId: ORG, eventId: EVENT });
     } finally {
       await worker.close();
       await queue.close();

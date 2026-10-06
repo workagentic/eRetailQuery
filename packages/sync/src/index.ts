@@ -2,3 +2,7 @@ export * from './ports';
 export * from './policies';
 export * from './memory';
 export * from './cogs';
+export * from './sinks/context';
+export * from './sinks/util';
+export * from './sinks/locations';
+export * from './sinks/products';

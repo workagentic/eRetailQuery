@@ -1,3 +1,4 @@
+import type { SinkContext } from '../src/sinks/context';
 import { createTenantDb, type TenantDb } from '@erq/db';
 import { startTestDatabase, type TestDatabase } from '@erq/db/testing';
 import { Pool } from 'pg';
@@ -127,3 +128,13 @@ export async function seedOrder(
   }
   return orderId;
 }
+
+export const sinkContext = (over: Partial<SinkContext> = {}): SinkContext => ({
+  orgId: ORG_A,
+  connectionId: CONN_A,
+  syncRunId: '99999999-9999-4999-8999-999999999999',
+  timezone: 'America/New_York',
+  now: new Date('2026-10-06T12:00:00Z'),
+  costEffectiveFrom: '2026-01-01',
+  ...over,
+});

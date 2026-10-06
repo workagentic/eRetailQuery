@@ -14,6 +14,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
           <span className="font-semibold">eRetailQuery</span>
           <nav aria-label="Main" className="flex gap-4 text-sm">
             <Link href="/dashboard">Dashboard</Link>
+            <Link href="/connections">Connections</Link>
             <Link href="/team">Team</Link>
           </nav>
           <div className="ml-auto flex items-center gap-3">

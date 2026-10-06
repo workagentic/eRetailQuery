@@ -32,3 +32,30 @@ test('signed-out visitors are sent to login and keep their destination safely', 
     /next=%2Fdashboard/,
   );
 });
+
+test('the Connections page guides a new owner and never echoes query text', async ({ page }) => {
+  const email = `e2e+conn${Date.now()}@example.com`;
+  await page.goto('/signup');
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password').fill('correct-horse-battery');
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await page.getByLabel('Business name').fill('E2E Connections');
+  await page.getByRole('button', { name: 'Create business' }).click();
+  await expect(page).toHaveURL(/\/dashboard/);
+
+  await page.getByRole('link', { name: 'Connections' }).click();
+  await expect(page.getByRole('heading', { name: 'Connections' })).toBeVisible();
+  await expect(page.getByText(/Connect your Shopify store to see your real profit/)).toBeVisible();
+
+  await page.getByLabel('Your Shopify store address').fill('evil.com');
+  await expect(page.getByText(/does not look like a Shopify address/)).toBeVisible();
+  await page.getByLabel('Your Shopify store address').fill('my-store');
+  await expect(page.getByText('We will connect my-store.myshopify.com.')).toBeVisible();
+
+  await page.goto('/connections?shopify_error=%3Cscript%3Ealert(1)%3C/script%3E');
+  const alert = page.getByRole('alert');
+  await expect(alert).toBeVisible();
+  await expect(alert).not.toContainText('script');
+  await page.goto('/connections?shopify=connected');
+  await expect(page.getByRole('status').filter({ hasText: 'connected' })).toBeVisible();
+});

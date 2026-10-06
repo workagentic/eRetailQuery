@@ -8,3 +8,8 @@ export * from './sinks/locations';
 export * from './sinks/products';
 export * from './sinks/inventory';
 export * from './sinks/orders';
+export * from './engine/deps';
+export * from './engine/start';
+export * from './engine/process';
+export * from './engine/fail';
+export * from './engine/resume';

@@ -57,26 +57,69 @@ async function startDocker(): Promise<TestDatabase> {
   return { ownerUrl, appUrl: toAppUrl(ownerUrl), stop: async () => void (await container.stop()) };
 }
 
-const live = new Set<string>(); // data directories of embedded servers that are still running
+/** Data directory -> postmaster pid (undefined until the server has started) of embedded servers still running. */
+const live = new Map<string, number | undefined>();
 
-/** Kills the postmaster (and its backends) found in dir/postmaster.pid, then removes dir. Never throws. */
-function killServerSync(dir: string): void {
+function readPid(dir: string): number | undefined {
   try {
     const pid = Number(readFileSync(path.join(dir, 'postmaster.pid'), 'utf8').split('\n')[0]);
-    if (Number.isSafeInteger(pid) && pid > 0) {
-      if (process.platform === 'win32') {
-        // /T kills the whole tree: pg.stop() only stops the postmaster and leaves backends behind on Windows.
-        execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
-          stdio: 'ignore',
-          windowsHide: true,
-        });
-      } else {
-        process.kill(pid, 'SIGQUIT'); // immediate shutdown; the directory is deleted next
-      }
+    return Number.isSafeInteger(pid) && pid > 0 ? pid : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function sleepSync(ms: number): void {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/** Kills the postmaster tree for pid. Works even if the pid file is already gone. Never throws. */
+function killTreeSync(pid: number, dir: string): void {
+  try {
+    if (process.platform === 'win32') {
+      // /T kills the whole tree: pg.stop() only stops the postmaster and leaves backends behind on Windows.
+      execFileSync('taskkill', ['/PID', String(pid), '/T', '/F'], {
+        stdio: 'ignore',
+        windowsHide: true,
+      });
+    } else {
+      process.kill(pid, 'SIGQUIT'); // immediate shutdown
+      for (let i = 0; i < 30 && pidAlive(pid); i++) sleepSync(100);
     }
   } catch {
     // already gone
   }
+  if (process.platform === 'win32') {
+    // Children whose postmaster already exited are no longer in its tree; sweep by data directory.
+    try {
+      execFileSync(
+        'powershell',
+        [
+          '-NoProfile',
+          '-Command',
+          `Get-CimInstance Win32_Process | Where-Object { $_.ProcessId -ne $PID -and $_.CommandLine -like '*${dir.replace(/'/g, "''")}*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
+        ],
+        { stdio: 'ignore', windowsHide: true },
+      );
+    } catch {
+      // best effort
+    }
+  }
+}
+
+/** Kills the server for dir (remembered pid, else postmaster.pid), then removes dir. Never throws. */
+function killServerSync(dir: string): void {
+  const pid = live.get(dir) ?? readPid(dir);
+  if (pid !== undefined) killTreeSync(pid, dir);
   try {
     rmSync(dir, { recursive: true, force: true, maxRetries: 20, retryDelay: 250 });
   } catch {
@@ -87,13 +130,14 @@ function killServerSync(dir: string): void {
 
 /** Reaps every embedded database this process started and did not stop. Safe to call repeatedly. */
 export function cleanupLeakedDatabases(): void {
-  for (const dir of [...live]) killServerSync(dir);
+  for (const dir of [...live.keys()]) killServerSync(dir);
 }
 
-let hooked = false;
+const HOOKED = Symbol.for('erq.db.testing.hooked');
 function installHooks(): void {
-  if (hooked) return;
-  hooked = true;
+  const g = globalThis as Record<symbol, unknown>;
+  if (g[HOOKED]) return;
+  g[HOOKED] = true;
   process.on('exit', cleanupLeakedDatabases);
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.on(signal, () => {
@@ -109,7 +153,7 @@ async function startEmbedded(): Promise<TestDatabase> {
   const { default: EmbeddedPostgres } = await import('embedded-postgres');
   installHooks();
   const dir = await mkdtemp(path.join(os.tmpdir(), 'erq-pg-'));
-  live.add(dir);
+  live.set(dir, undefined);
   const port = await freePort();
   const pg = new EmbeddedPostgres({
     databaseDir: dir,
@@ -123,6 +167,7 @@ async function startEmbedded(): Promise<TestDatabase> {
   try {
     await pg.initialise();
     await pg.start();
+    live.set(dir, readPid(dir));
     await pg.createDatabase('erq');
     const ownerUrl = `postgres://erq_owner:owner@127.0.0.1:${port}/erq`;
     await runMigrations(ownerUrl, APP_USER_PASSWORD);
@@ -132,7 +177,11 @@ async function startEmbedded(): Promise<TestDatabase> {
       dataDir: dir,
       stop: async () => {
         try {
-          await pg.stop();
+          // Kill the whole tree while the postmaster is still alive: once it has exited (even cleanly), its
+          // children (e.g. PG 18 io_worker) are orphaned and can no longer be found through the tree.
+          const pid = live.get(dir);
+          if (pid !== undefined) killTreeSync(pid, dir);
+          await Promise.race([pg.stop(), new Promise((resolve) => setTimeout(resolve, 5000))]);
         } catch {
           // fall through to the forced cleanup
         } finally {

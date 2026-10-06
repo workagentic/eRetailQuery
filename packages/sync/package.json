@@ -18,7 +18,8 @@
     "@erq/db": "workspace:*",
     "@erq/metrics": "workspace:*",
     "@erq/shared": "workspace:*",
-    "drizzle-orm": "^0.45.3"
+    "drizzle-orm": "^0.45.3",
+    "zod": "^3.25.76"
   },
   "devDependencies": {
     "@types/pg": "^8.23.1",

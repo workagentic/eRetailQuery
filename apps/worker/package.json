@@ -10,8 +10,10 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@erq/connectors": "workspace:*",
     "@erq/db": "workspace:*",
     "@erq/shared": "workspace:*",
+    "@erq/sync": "workspace:*",
     "bullmq": "^6.3.11",
     "dotenv": "^18.0.5",
     "ioredis": "^6.0.0"

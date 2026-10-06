@@ -32,6 +32,11 @@ describe('parseSyncPageJob', () => {
   ])('rejects %j', (data) => {
     expect(() => parseSyncPageJob(data)).toThrow();
   });
+  it('parses a job without a chain and does not invent one', () => {
+    const job = parseSyncPageJob(base);
+    expect(job).toEqual(base);
+    expect('then' in job).toBe(false);
+  });
   it('rejects unknown keys so credentials can never travel in job data', () => {
     expect(() => parseSyncPageJob({ ...base, accessToken: 'shpat_x' })).toThrow();
   });
@@ -41,7 +46,7 @@ describe('parseSyncPageJob', () => {
         ...base,
         then: { resources: ['products'], mode: 'backfill', since: null },
       }),
-    ).toThrow();
+    ).toThrow(/a backfill chain requires since/);
     expect(() =>
       parseSyncPageJob({
         ...base,

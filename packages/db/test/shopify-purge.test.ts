@@ -41,6 +41,19 @@ beforeAll(async () => {
     `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload) values ($1, $2, 't', 'e-second', '{}')`,
     [A, A2],
   );
+  await owner.query(
+    `insert into orders (org_id, store_connection_id, external_order_id, channel, status, placed_at, currency,
+                         gross_cents, discount_cents, shipping_charged_cents, tax_cents, refund_cents, net_cents, external_updated_at)
+     values ($1, $2, 'o-second', 'shopify_online', 'open', now(), 'USD', 500, 0, 0, 0, 0, 500, now())`,
+    [A, A2],
+  );
+  // OAuth states in org A: one for the shop about to be purged, one for the second connection's shop.
+  await owner.query(
+    `insert into oauth_states (org_id, user_id, platform, shop, nonce_hash, expires_at) values
+       ($1, gen_random_uuid(), 'shopify', 'shop-' || ($1::uuid)::text, 'hash-purged-shop', now() + interval '10 minutes'),
+       ($1, gen_random_uuid(), 'shopify', 'second.myshopify.com', 'hash-second-shop', now() + interval '10 minutes')`,
+    [A],
+  );
   // The fixture sync_run points at a random connection id; add one that really belongs to each connection.
   await owner.query(
     `insert into sync_runs (org_id, connection_kind, connection_id, type, status) values ($1, 'store', $1, 'backfill', 'running'), ($1, 'store', $2, 'backfill', 'running')`,
@@ -76,6 +89,18 @@ describe('app_purge_store_connection', () => {
     expect(await count('inventory_movements', `location_id = $1`, [A2])).toBe(1);
     expect(await count('sync_runs', `org_id = $1 and connection_id = $2`, [A, A2])).toBe(1);
     expect(await count('webhook_events', `store_connection_id = $1`, [A2])).toBe(1);
+    expect(await count('inventory_levels', `location_id = $1`, [A2])).toBe(1);
+    expect(await count('orders', `store_connection_id = $1`, [A2])).toBe(1);
+    // only the purged shop's OAuth states go; the org's other shops keep theirs
+    expect(
+      await count('oauth_states', `org_id = $1 and shop = 'shop-' || ($1::uuid)::text`, [A]),
+    ).toBe(0);
+    expect(await count('oauth_states', `org_id = $1 and shop = 'second.myshopify.com'`, [A])).toBe(
+      1,
+    );
+    expect(await count('oauth_states', `org_id = $1 and shop = 'fixture.myshopify.com'`, [A])).toBe(
+      1,
+    );
     expect(await count('store_connections', `org_id = $1`, [B])).toBe(1);
     expect(await count('orders', `org_id = $1`, [B])).toBe(1);
     expect(await count('skus', `org_id = $1`, [A])).toBe(1);

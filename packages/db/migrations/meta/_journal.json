@@ -71,6 +71,20 @@
       "when": 1791296691293,
       "tag": "0009_sync_inventory_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791297085936,
+      "tag": "0010_sync_orders",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1791297089805,
+      "tag": "0011_sync_orders_rls",
+      "breakpoints": true
     }
   ]
 }

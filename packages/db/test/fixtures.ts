@@ -84,4 +84,32 @@ export const fixtures: Record<string, Fixture> = {
        values ($1, $1, $1, 'p-1', 'v-1')`,
       [org],
     ),
+  orders: (q, org) =>
+    q.query(
+      `insert into orders (id, org_id, store_connection_id, external_order_id, channel, status, placed_at, currency,
+                           gross_cents, discount_cents, shipping_charged_cents, tax_cents, refund_cents, net_cents, external_updated_at)
+       values ($1, $1, $1, 'o-' || ($1::uuid)::text, 'shopify_online', 'open', now(), 'USD', 1000, 0, 0, 0, 0, 1000, now())`,
+      [org],
+    ),
+  order_lines: (q, org) =>
+    q.query(
+      `insert into order_lines (id, org_id, order_id, sku_id, external_line_id, title, quantity, unit_price_cents)
+       values ($1, $1, $1, $1, 'line-1', 'Widget', 1, 1000)`,
+      [org],
+    ),
+  refunds: (q, org) =>
+    q.query(
+      `insert into refunds (id, org_id, order_id, external_refund_id, refunded_at, amount_cents) values ($1, $1, $1, 'r-1', now(), 100)`,
+      [org],
+    ),
+  refund_lines: (q, org) =>
+    q.query(
+      `insert into refund_lines (org_id, refund_id, order_line_id, quantity, amount_cents) values ($1, $1, $1, 1, 100)`,
+      [org],
+    ),
+  sync_cursors: (q, org) =>
+    q.query(
+      `insert into sync_cursors (org_id, store_connection_id, resource, status) values ($1, $1, 'orders', 'idle')`,
+      [org],
+    ),
 };

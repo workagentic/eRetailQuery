@@ -35,8 +35,8 @@ export class FakeShopify implements HttpClient {
     if (scripted) return scripted;
     const url = new URL(req.url);
     if (url.pathname === '/admin/oauth/access_token') {
-      const body = JSON.parse(req.body ?? '{}') as { code?: string };
-      if (!body.code || !this.codes.has(body.code)) {
+      const code = new URLSearchParams(req.body ?? '').get('code');
+      if (!code || !this.codes.has(code)) {
         return { status: 400, headers: {}, body: '{"error":"invalid_request"}' };
       }
       return {

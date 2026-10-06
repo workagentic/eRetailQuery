@@ -25,6 +25,7 @@ const MUTATION = `mutation Subscribe($topic: WebhookSubscriptionTopic!, $url: UR
 /** `orders/create` becomes `ORDERS_CREATE`, `inventory_levels/update` becomes `INVENTORY_LEVELS_UPDATE`. */
 export const topicToEnum = (topic: string): string => topic.replace(/\//g, '_').toUpperCase();
 
+// Not independently verified against the docs: the `URL!` variable type and `format: JSON`. Check against a real shop in 1b-3.
 export async function registerWebhooks(
   http: HttpClient,
   p: {

@@ -20,7 +20,8 @@ describe('exchangeCodeForToken', () => {
     const req = http.requests[0]!;
     expect(req.method).toBe('POST');
     expect(req.url).toBe('https://a.myshopify.com/admin/oauth/access_token');
-    expect(JSON.parse(req.body!)).toEqual({
+    expect(req.headers?.['content-type']).toBe('application/x-www-form-urlencoded');
+    expect(Object.fromEntries(new URLSearchParams(req.body!))).toEqual({
       client_id: 'k',
       client_secret: 's3cret',
       code: 'good-code',

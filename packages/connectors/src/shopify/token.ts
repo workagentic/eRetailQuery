@@ -14,8 +14,12 @@ export async function exchangeCodeForToken(
   const res = await http.request({
     method: 'POST',
     url: `https://${p.shop}/admin/oauth/access_token`,
-    headers: { 'content-type': 'application/json', accept: 'application/json' },
-    body: JSON.stringify({ client_id: p.apiKey, client_secret: p.apiSecret, code: p.code }),
+    headers: { 'content-type': 'application/x-www-form-urlencoded', accept: 'application/json' },
+    body: new URLSearchParams({
+      client_id: p.apiKey,
+      client_secret: p.apiSecret,
+      code: p.code,
+    }).toString(),
   });
   if (res.status === 401 || res.status === 403)
     throw new AuthError('Shopify rejected the app credentials');

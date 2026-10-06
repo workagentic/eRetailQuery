@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { PermanentError, TransientError } from '../src/errors';
 import type { ConnectionContext } from '../src/types';
-import { FakeConnector, runConnectorContract, sampleData } from '../src/testing';
+import { FakeConnector, sampleData } from '../src/testing';
+import { runConnectorContract } from '../src/testing/contract';
 
 const ctx: ConnectionContext = {
   connectionId: 'c1',

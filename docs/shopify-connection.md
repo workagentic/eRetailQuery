@@ -70,11 +70,11 @@ All keys are listed with empty placeholders in `.env.example`. An empty value is
 
 | Route | Auth | Notes |
 |---|---|---|
-| `POST /orgs/:orgId/connections/shopify/install` | AuthGuard, OrgGuard, RolesGuard (admin and up) | Body `{ shop }`, normalized (trim, lowercase) and validated. 400 `invalid_shop`, 503 `shopify_not_configured`. Returns `{ authorizeUrl }`. Lazily deletes the org's expired states. |
+| `POST /orgs/:orgId/connections/shopify/install` | AuthGuard, OrgGuard, RolesGuard (admin and up) | Body `{ shop }`, normalized (trim, lowercase) and validated (one DNS label under `myshopify.com`). 400 `invalid_shop` (400 `validation_failed` for an empty body value), 503 `shopify_not_configured` when the Shopify config or the encryption key is missing, so the merchant is never sent to consent first. Returns `{ authorizeUrl }`. Lazily deletes the org's expired states. |
 | `GET /orgs/:orgId/connections` | any member | id, platform, shop, status, `lastSyncedAt`, `lastError`. Never credentials. |
 | `POST /orgs/:orgId/connections/:id/disconnect` | admin and up | Status `disconnected`, token wiped, audit row. 404 `connection_not_found`. Never deletes the row. |
 | `GET /connections/shopify/callback` | public: query HMAC plus single-use state | Always redirects, never throws. |
-| `POST /webhooks/shopify` | public: HMAC over the raw body | 200 for stored, duplicate and unknown shop; 401 `invalid_signature`; 400 `invalid_payload`; 503 `shopify_not_configured`. |
+| `POST /webhooks/shopify` | public: HMAC over the raw body | 200 for stored, duplicate and unknown shop; 401 `invalid_signature`; 400 `bad_request` for malformed JSON (body-parser rejects it before the HMAC check, so the receiver's own `invalid_payload` code is unreachable); 503 `shopify_not_configured`. Answers within about 2 s even when Redis is down (the enqueue is capped; the row stays `received` for the sweep). |
 
 Callback error codes (`?shopify_error=`), all fixed strings:
 
@@ -94,7 +94,7 @@ Token exchange: the request to `https://<shop>/admin/oauth/access_token` is sent
 
 ### Request body parsing
 
-`configureApp` mounts a 2mb JSON parser on `/webhooks/shopify` and a 100kb parser everywhere else; both capture `req.rawBody`, which the HMAC is computed over. Nest's own body parsers are off (`bodyParser: false`), so urlencoded bodies are no longer parsed; add a urlencoded parser in `configureApp` if a form endpoint appears. The exception filter maps body-parser 4xx errors instead of returning 500: 413 `payload_too_large`, and malformed JSON as 400.
+`configureApp` mounts a 2mb JSON parser on `/webhooks/shopify` and a 100kb parser everywhere else; both capture `req.rawBody`, which the HMAC is computed over. Nest's own body parsers are off (`bodyParser: false`), so urlencoded bodies are no longer parsed; add a urlencoded parser in `configureApp` if a form endpoint appears. The exception filter maps body-parser 4xx errors instead of returning 500: 413 `payload_too_large`, and malformed JSON as 400 `bad_request`.
 
 ## 5. Webhooks
 

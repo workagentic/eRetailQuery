@@ -286,3 +286,83 @@ describe('skuPricing: the floor price agrees with the contribution reported at t
     }
   }
 });
+
+describe('landedCost guards', () => {
+  it('rejects per-batch components', () => {
+    expect(() =>
+      landedCost([{ ...comp(100, '2026-01-01'), perUnit: false }], '2026-02-01'),
+    ).toThrow(RangeError);
+  });
+  it('accepts perUnit true or omitted', () => {
+    expect(landedCost([{ ...comp(100, '2026-01-01'), perUnit: true }], '2026-02-01')).toEqual(
+      money(100),
+    );
+    expect(landedCost([comp(100, '2026-01-01')], '2026-02-01')).toEqual(money(100));
+  });
+  it('rejects malformed effective dates', () => {
+    expect(() => landedCost([comp(100, '2026/01/01')], '2026-02-01')).toThrow(RangeError);
+    expect(() => landedCost([comp(100, '2026-01-01', '1/2/2027')], '2026-02-01')).toThrow(
+      RangeError,
+    );
+  });
+});
+
+describe('skuPricing config and negative inputs', () => {
+  const base = { price: money(5000), landed: money(2000) };
+  it('falls back to defaults for undefined config keys', () => {
+    const a = skuPricing({ ...base, config: { targetMarkupLow: undefined } });
+    expect(a).toEqual(skuPricing(base));
+  });
+  it.each([
+    [{ targetMarkupLow: 20000 }],
+    [{ targetMarkupLow: -1 }],
+    [{ targetMarkupHigh: NaN }],
+    [{ minContribution: -1 }],
+    [{ minContribution: 10000 }],
+    [{ minContribution: 1.5 }],
+  ])('rejects invalid config %j', (config) => {
+    expect(() => skuPricing({ ...base, config })).toThrow(RangeError);
+  });
+  it('freezes the defaults', () => {
+    expect(Object.isFrozen(DEFAULT_PRICING_CONFIG)).toBe(true);
+  });
+  it('rejects negative discount, landed and fixed amounts', () => {
+    expect(() => skuPricing({ ...base, discount: money(-1) })).toThrow(RangeError);
+    expect(() => skuPricing({ price: money(5000), landed: money(-1) })).toThrow(RangeError);
+    expect(() => skuPricing({ ...base, fulfillment: { fixed: { pickPack: money(-1) } } })).toThrow(
+      RangeError,
+    );
+  });
+  it('rejects a discount in another currency', () => {
+    expect(() => skuPricing({ ...base, discount: money(1, 'EUR') })).toThrow(/currency mismatch/);
+  });
+  it('warns exactly at the low end of the ideal range', () => {
+    const r = skuPricing({
+      price: money(3000),
+      landed: money(2000),
+      fulfillment: { fixed: { outboundShipping: money(1500) } },
+    });
+    expect(r.idealRange!.low).toEqual(money(3000));
+    expect(r.contribution).toEqual(money(-500));
+    expect(r.warning?.code).toBe('markup_ok_contribution_negative');
+  });
+  it('has no floor when fees plus the minimum reach 100%', () => {
+    const r = skuPricing({
+      price: money(5000),
+      landed: money(2000),
+      fulfillment: { percentOfPrice: { paymentFee: 8500 } },
+    });
+    expect(r.floorPrice).toBeNull();
+    expect(r.maxDiscount).toEqual(money(0));
+  });
+  it('finds a floor just under the 100% boundary and round-trips', () => {
+    const fulfillment = { percentOfPrice: { paymentFee: 8490 } };
+    const r = skuPricing({ price: money(5000000), landed: money(2000), fulfillment });
+    const f = r.floorPrice!.cents;
+    expect(f).toBeGreaterThan(0);
+    const at = (cents: number) =>
+      skuPricing({ price: money(cents), landed: money(2000), fulfillment });
+    expect(at(f).contribution.cents * 10000 >= 1500 * f).toBe(true);
+    expect(at(f - 1).contribution.cents * 10000 >= 1500 * (f - 1)).toBe(false);
+  });
+});

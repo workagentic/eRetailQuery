@@ -1,4 +1,5 @@
 import { formatMoney, money, type Money } from '@erq/shared';
+import { withDefaults } from './internal';
 import { bigRatioToBps, divRound, toSafeInteger, type Bps } from './bps';
 
 function assertSameCurrency(a: Money, b: Money): void {
@@ -60,13 +61,13 @@ export interface AdFlagConfig {
   genericBands: { poor: number; good: number };
 }
 
-export const DEFAULT_AD_FLAG_CONFIG: AdFlagConfig = {
+export const DEFAULT_AD_FLAG_CONFIG: Readonly<AdFlagConfig> = Object.freeze({
   minSpendCents: 5000,
   minImpressions: 1000,
   winningMultiple: 1.5,
   declineThreshold: 2000,
-  genericBands: { poor: 1.5, good: 3 },
-};
+  genericBands: Object.freeze({ poor: 1.5, good: 3 }),
+});
 
 export type AdFlagCode = 'learning' | 'losing' | 'watch' | 'winning';
 
@@ -91,7 +92,47 @@ export interface AdFlag {
   explanation: string;
 }
 
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const DAY_ERROR =
+  'ad days must be consecutive calendar dates with no duplicates; zero-fill missing days';
+
+function assertAdConfig(c: AdFlagConfig): void {
+  for (const [name, v] of [
+    ['minSpendCents', c.minSpendCents],
+    ['minImpressions', c.minImpressions],
+  ] as const) {
+    if (!Number.isSafeInteger(v) || v < 0) {
+      throw new RangeError(`${name} must be a non-negative integer, got ${v}`);
+    }
+  }
+  if (!Number.isFinite(c.winningMultiple) || c.winningMultiple < 1) {
+    throw new RangeError(`winningMultiple must be a finite number >= 1, got ${c.winningMultiple}`);
+  }
+  if (
+    !Number.isSafeInteger(c.declineThreshold) ||
+    c.declineThreshold < 0 ||
+    c.declineThreshold > 10000
+  ) {
+    throw new RangeError(
+      `declineThreshold must be an integer in [0, 10000], got ${c.declineThreshold}`,
+    );
+  }
+  const { poor, good } = c.genericBands;
+  if (!Number.isFinite(poor) || !Number.isFinite(good) || poor < 0 || poor > good) {
+    throw new RangeError(
+      `genericBands must be finite with 0 <= poor <= good, got ${poor} / ${good}`,
+    );
+  }
+}
+
+/** Whole days since the epoch for a YYYY-MM-DD date, using UTC calendar arithmetic only. */
+function dayNumber(date: string): number {
+  const [y, m, d] = date.split('-').map(Number) as [number, number, number];
+  return Date.UTC(y, m - 1, d) / 86400000;
+}
+
 function validateDay(day: AdDay, currency: string): void {
+  if (!ISO_DATE.test(day.date)) throw new RangeError(`date must be YYYY-MM-DD, got ${day.date}`);
   if (day.spend.currency !== currency || day.revenue.currency !== currency) {
     throw new Error(
       `currency mismatch: ${day.spend.currency}/${day.revenue.currency} vs ${currency}`,
@@ -132,11 +173,9 @@ export function classifyAd(
   input: { days: AdDay[]; contributionBeforeAds: Bps | null },
   config: Partial<AdFlagConfig> = {},
 ): AdFlag {
-  const cfg: AdFlagConfig = {
-    ...DEFAULT_AD_FLAG_CONFIG,
-    ...config,
-    genericBands: { ...DEFAULT_AD_FLAG_CONFIG.genericBands, ...config.genericBands },
-  };
+  const cfg = withDefaults<AdFlagConfig>(DEFAULT_AD_FLAG_CONFIG, config);
+  cfg.genericBands = withDefaults(DEFAULT_AD_FLAG_CONFIG.genericBands, config.genericBands);
+  assertAdConfig(cfg);
   const c = input.contributionBeforeAds;
   if (c !== null && !Number.isSafeInteger(c)) {
     throw new RangeError(`contributionBeforeAds must be an integer in basis points, got ${c}`);
@@ -145,6 +184,11 @@ export function classifyAd(
   const sorted = [...input.days].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
   const currency = sorted[0]?.spend.currency ?? 'USD';
   sorted.forEach((d) => validateDay(d, currency));
+  for (let i = 1; i < sorted.length; i++) {
+    if (dayNumber(sorted[i]!.date) - dayNumber(sorted[i - 1]!.date) !== 1) {
+      throw new RangeError(DAY_ERROR);
+    }
+  }
 
   const recent = sorted.slice(-7);
   const previous = sorted.slice(-14, -7);

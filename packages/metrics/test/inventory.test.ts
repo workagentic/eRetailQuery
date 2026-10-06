@@ -143,3 +143,61 @@ describe('stockByLocation', () => {
     );
   });
 });
+
+describe('stockFlags facts and edge cases', () => {
+  it('reports the facts it used', () => {
+    const r = stockFlags({
+      available: 20,
+      velocity: 2,
+      unitsSold90: 100,
+      reorderPoint: 5,
+      leadTimeDays: 10,
+      bufferDays: 4,
+      overstockDays: 90,
+    });
+    expect(r.facts).toEqual({
+      available: 20,
+      velocity: 2,
+      daysOfCover: 10,
+      lowThresholdDays: 14,
+      reorderPoint: 5,
+      overstockDays: 90,
+      unitsSold90: 100,
+    });
+  });
+  it('uses null facts when unknown', () => {
+    const r = stockFlags({ available: 5, velocity: 0, unitsSold90: 0 });
+    expect(r.facts.daysOfCover).toBeNull();
+    expect(r.facts.reorderPoint).toBeNull();
+    expect(r.facts.lowThresholdDays).toBe(14);
+    expect(r.facts.overstockDays).toBe(180);
+  });
+  it('says out of stock when nothing is left and low did not fire', () => {
+    const r = stockFlags({ available: 0, velocity: 0, unitsSold90: 0 });
+    expect(r.low.fired).toBe(false);
+    expect(r.low.explanation).toBe('Out of stock, and nothing has sold in a while.');
+  });
+  it('fires low at reorderPoint 0 with nothing left, not with one left', () => {
+    expect(
+      stockFlags({ available: 0, velocity: 0, unitsSold90: 0, reorderPoint: 0 }).low.fired,
+    ).toBe(true);
+    expect(
+      stockFlags({ available: 1, velocity: 0, unitsSold90: 0, reorderPoint: 0 }).low.fired,
+    ).toBe(false);
+  });
+  it.each(['reorderPoint', 'leadTimeDays', 'bufferDays', 'overstockDays'])(
+    'rejects NaN or negative %s',
+    (key) => {
+      for (const bad of [NaN, -1]) {
+        expect(() => stockFlags({ available: 1, velocity: 1, unitsSold90: 1, [key]: bad })).toThrow(
+          RangeError,
+        );
+      }
+    },
+  );
+  it('ignores undefined options', () => {
+    expect(() =>
+      stockFlags({ available: 1, velocity: 1, unitsSold90: 1, leadTimeDays: undefined }),
+    ).not.toThrow();
+  });
+});

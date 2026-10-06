@@ -8,6 +8,7 @@ import {
   sum,
   type Money,
 } from '@erq/shared';
+import { withDefaults } from './internal';
 import { formatBps, moneyRatioBps, mulDivRound, toSafeInteger, type Bps } from './bps';
 
 export interface CostComponent {
@@ -18,6 +19,8 @@ export interface CostComponent {
   effectiveFrom: string;
   /** Exclusive, YYYY-MM-DD, or null for open-ended. */
   effectiveTo: string | null;
+  /** Must be true or omitted. Per-batch costs must be converted to per-unit first. */
+  perUnit?: boolean;
 }
 
 export interface FulfillmentAssumptions {
@@ -32,11 +35,11 @@ export interface PricingConfig {
   minContribution: Bps;
 }
 
-export const DEFAULT_PRICING_CONFIG: PricingConfig = {
+export const DEFAULT_PRICING_CONFIG: Readonly<PricingConfig> = Object.freeze({
   targetMarkupLow: 5000,
   targetMarkupHigh: 10000,
   minContribution: 1500,
-};
+});
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -45,6 +48,19 @@ export function landedCost(components: CostComponent[], asOf: string, currency =
   if (!ISO_DATE.test(asOf)) throw new RangeError(`asOf must be YYYY-MM-DD, got ${asOf}`);
   let total = money(0, currency);
   for (const c of components) {
+    if (c.perUnit === false) {
+      throw new RangeError(
+        'per-batch costs must be converted to per-unit first; landedCost only sums per-unit components',
+      );
+    }
+    if (
+      !ISO_DATE.test(c.effectiveFrom) ||
+      (c.effectiveTo !== null && !ISO_DATE.test(c.effectiveTo))
+    ) {
+      throw new RangeError(
+        `effectiveFrom and effectiveTo must be YYYY-MM-DD, got ${c.effectiveFrom} / ${c.effectiveTo}`,
+      );
+    }
     if (c.currency !== currency) throw new Error(`currency mismatch: ${c.currency} vs ${currency}`);
     const amount = money(c.amountCents, c.currency);
     if (c.effectiveFrom <= asOf && (c.effectiveTo === null || asOf < c.effectiveTo)) {
@@ -54,12 +70,12 @@ export function landedCost(components: CostComponent[], asOf: string, currency =
   return total;
 }
 
-export function fixedTotal(fixed: FulfillmentAssumptions['fixed'], currency: string): Money {
+function fixedTotal(fixed: FulfillmentAssumptions['fixed'], currency: string): Money {
   const values = Object.values(fixed ?? {}).filter((m): m is Money => m !== undefined);
   return sum(values, currency);
 }
 
-export function percentTotal(percent: FulfillmentAssumptions['percentOfPrice']): Bps {
+function percentTotal(percent: FulfillmentAssumptions['percentOfPrice']): Bps {
   let total = 0;
   for (const [name, bps] of Object.entries(percent ?? {})) {
     if (bps === undefined) continue;
@@ -130,6 +146,24 @@ function findFloor(
   throw new Error('floor price search failed');
 }
 
+function assertPricingConfig(c: PricingConfig): void {
+  const { targetMarkupLow: low, targetMarkupHigh: high, minContribution: min } = c;
+  if (
+    !Number.isSafeInteger(low) ||
+    low < 0 ||
+    !Number.isSafeInteger(high) ||
+    high < 0 ||
+    low > high
+  ) {
+    throw new RangeError(
+      `target markup must be non-negative integers with low <= high, got ${low} / ${high}`,
+    );
+  }
+  if (!Number.isSafeInteger(min) || min < 0 || min >= 10000) {
+    throw new RangeError(`minContribution must be an integer in [0, 10000), got ${min}`);
+  }
+}
+
 export function skuPricing(input: {
   price: Money;
   discount?: Money;
@@ -137,7 +171,8 @@ export function skuPricing(input: {
   fulfillment?: FulfillmentAssumptions;
   config?: Partial<PricingConfig>;
 }): SkuPricing {
-  const config: PricingConfig = { ...DEFAULT_PRICING_CONFIG, ...input.config };
+  const config = withDefaults<PricingConfig>(DEFAULT_PRICING_CONFIG, input.config);
+  assertPricingConfig(config);
   const { price, landed } = input;
   const currency = price.currency;
   const discount = input.discount ?? money(0, currency);
@@ -148,6 +183,14 @@ export function skuPricing(input: {
   const netPrice = subtract(price, discount);
   if (price.cents < 0 || netPrice.cents < 0) {
     throw new RangeError('price and discount must leave a non-negative net price');
+  }
+
+  if (landed.cents < 0) throw new RangeError('landed cost cannot be negative');
+  if (discount.cents < 0) throw new RangeError('discount cannot be negative');
+  for (const m of Object.values(fulfillment.fixed ?? {})) {
+    if (m !== undefined && m.cents < 0) {
+      throw new RangeError('fixed fulfillment amounts cannot be negative');
+    }
   }
 
   const percentCost = applyBasisPoints(netPrice, pct);

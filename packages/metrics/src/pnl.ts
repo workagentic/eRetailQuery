@@ -48,7 +48,7 @@ export interface Pnl {
 }
 
 /** The additive lines a P&L is built from. */
-export interface PnlBase {
+interface PnlBase {
   currency: string;
   grossSales: Money;
   discounts: Money;
@@ -62,7 +62,7 @@ export interface PnlBase {
   otherOpex: Money;
 }
 
-export function assemble(base: PnlBase, cogsComplete: boolean): Pnl {
+function assemble(base: PnlBase, cogsComplete: boolean): Pnl {
   const { currency } = base;
   const netSales = subtract(subtract(base.grossSales, base.discounts), base.refunds);
   const grossProfit = subtract(netSales, base.cogs);

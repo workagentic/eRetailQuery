@@ -52,6 +52,15 @@ export interface StockFlag {
   explanation: string;
 }
 export interface StockFlags {
+  facts: {
+    available: number;
+    velocity: number;
+    daysOfCover: number | null;
+    lowThresholdDays: number;
+    reorderPoint: number | null;
+    overstockDays: number;
+    unitsSold90: number;
+  };
   low: StockFlag;
   overstock: StockFlag;
   dead: StockFlag;
@@ -67,6 +76,14 @@ export function stockFlags(input: {
   overstockDays?: number;
 }): StockFlags {
   assertNonNegative('unitsSold90', input.unitsSold90);
+  for (const [name, value] of [
+    ['reorderPoint', input.reorderPoint],
+    ['leadTimeDays', input.leadTimeDays],
+    ['bufferDays', input.bufferDays],
+    ['overstockDays', input.overstockDays],
+  ] as const) {
+    if (value !== undefined) assertNonNegative(name, value);
+  }
   const cover = daysOfCover(input.available, input.velocity);
   const threshold =
     input.leadTimeDays === undefined
@@ -88,7 +105,13 @@ export function stockFlags(input: {
       explanation: `Running low: about ${Math.floor(cover)} days of stock left, and you need ${threshold} days to restock safely. Reorder now.`,
     };
   } else {
-    low = { fired: false, explanation: 'Stock level is fine.' };
+    low = {
+      fired: false,
+      explanation:
+        input.available === 0
+          ? 'Out of stock, and nothing has sold in a while.'
+          : 'Stock level is fine.',
+    };
   }
 
   const overstock: StockFlag =
@@ -107,7 +130,20 @@ export function stockFlags(input: {
         }
       : { fired: false, explanation: 'Selling normally or out of stock.' };
 
-  return { low, overstock, dead };
+  return {
+    facts: {
+      available: input.available,
+      velocity: input.velocity,
+      daysOfCover: cover,
+      lowThresholdDays: threshold,
+      reorderPoint: input.reorderPoint ?? null,
+      overstockDays,
+      unitsSold90: input.unitsSold90,
+    },
+    low,
+    overstock,
+    dead,
+  };
 }
 
 export function stockByLocation(

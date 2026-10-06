@@ -38,6 +38,12 @@ describe('@erq/metrics public API', () => {
   ])('exports the constant %s', (name) => {
     expect((metrics as Record<string, unknown>)[name]).toBeDefined();
   });
+  it.each(['assemble', 'fixedTotal', 'percentTotal', 'withDefaults'])(
+    'does not expose the internal %s',
+    (name) => {
+      expect((metrics as Record<string, unknown>)[name]).toBeUndefined();
+    },
+  );
   it('depends only on @erq/shared at runtime', () => {
     const pkg = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8')) as {
       dependencies?: Record<string, string>;

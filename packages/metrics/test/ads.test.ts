@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { money } from '@erq/shared';
-import { blendedRoas, breakEvenRoas, classifyAd, cpa, roas, type AdDay } from '../src/ads';
+import {
+  DEFAULT_AD_FLAG_CONFIG,
+  blendedRoas,
+  breakEvenRoas,
+  classifyAd,
+  cpa,
+  roas,
+  type AdDay,
+} from '../src/ads';
 
 describe('roas', () => {
   it('divides platform revenue by spend', () => {
@@ -273,5 +281,69 @@ describe('classifyAd input handling', () => {
       impressions: 3500,
       contributionBeforeAds: 4000,
     });
+  });
+});
+
+describe('classifyAd config handling', () => {
+  const sevenSmallDays = (): AdDay[] =>
+    Array.from({ length: 7 }, (_, i) =>
+      day(8 + i, { spend: money(100), impressions: 1, revenue: money(100) }),
+    );
+  it('treats undefined config keys as defaults', () => {
+    const f = classifyAd(
+      { days: sevenSmallDays(), contributionBeforeAds: 4000 },
+      { minSpendCents: undefined, minImpressions: undefined },
+    );
+    expect(f.code).toBe('learning');
+  });
+  it('keeps the default decline threshold when it is undefined', () => {
+    const days = [...week(1, 7000, 31500), ...week(8, 7000, 21000)];
+    const f = classifyAd(
+      { days, contributionBeforeAds: 5000 },
+      { declineThreshold: undefined, genericBands: { poor: undefined, good: undefined } as never },
+    );
+    expect(f.trend).toBe(-3333);
+    expect(f.code).toBe('watch');
+  });
+  it.each([
+    [{ minSpendCents: NaN }],
+    [{ minSpendCents: -1 }],
+    [{ minImpressions: 1.5 }],
+    [{ winningMultiple: 0.5 }],
+    [{ winningMultiple: Infinity }],
+    [{ declineThreshold: 10001 }],
+    [{ declineThreshold: -1 }],
+    [{ genericBands: { poor: 3, good: 1.5 } }],
+    [{ genericBands: { poor: -1, good: 3 } }],
+    [{ genericBands: { poor: 1, good: NaN } }],
+  ])('rejects invalid config %j', (config) => {
+    expect(() =>
+      classifyAd({ days: week(8, 7000, 14000), contributionBeforeAds: 4000 }, config),
+    ).toThrow(RangeError);
+  });
+  it('freezes the defaults', () => {
+    expect(Object.isFrozen(DEFAULT_AD_FLAG_CONFIG)).toBe(true);
+    expect(Object.isFrozen(DEFAULT_AD_FLAG_CONFIG.genericBands)).toBe(true);
+  });
+});
+
+describe('classifyAd date validation', () => {
+  const at = (date: string): AdDay => ({ ...day(1), date });
+  const run = (days: AdDay[]) => classifyAd({ days, contributionBeforeAds: 4000 });
+  it('rejects duplicate dates', () => {
+    expect(() => run([day(1), day(1)])).toThrow(RangeError);
+  });
+  it('rejects gaps', () => {
+    expect(() => run([day(7), day(14)])).toThrow(/consecutive calendar dates/);
+  });
+  it('rejects non-ISO dates', () => {
+    expect(() => run([at('9/1/2026')])).toThrow(RangeError);
+  });
+  it('accepts a month boundary', () => {
+    expect(() => run([at('2026-09-30'), at('2026-10-01')])).not.toThrow();
+  });
+  it('accepts a leap day and a year boundary', () => {
+    expect(() => run([at('2028-02-28'), at('2028-02-29'), at('2028-03-01')])).not.toThrow();
+    expect(() => run([at('2026-12-31'), at('2027-01-01')])).not.toThrow();
   });
 });

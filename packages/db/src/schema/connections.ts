@@ -39,6 +39,7 @@ export const storeConnections = pgTable(
   },
   (t) => [
     unique('store_connections_org_platform_acct_uq').on(t.orgId, t.platform, t.externalAccountId),
+    unique('store_connections_org_id_uq').on(t.orgId, t.id),
   ],
 );
 

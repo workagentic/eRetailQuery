@@ -32,8 +32,8 @@ export const fixtures: Record<string, Fixture> = {
     ]),
   store_connections: (q, org) =>
     q.query(
-      `insert into store_connections (org_id, platform, external_account_id, status)
-       values ($1, 'shopify', 'shop-' || ($1::uuid)::text, 'demo')`,
+      `insert into store_connections (id, org_id, platform, external_account_id, status)
+       values ($1, $1, 'shopify', 'shop-' || ($1::uuid)::text, 'demo')`,
       [org],
     ),
   ad_connections: (q, org) =>
@@ -60,6 +60,28 @@ export const fixtures: Record<string, Fixture> = {
     q.query(
       `insert into sku_cost_components (org_id, sku_id, component_type, amount_cents, effective_from)
        values ($1, $1, 'product_cost', 1000, '2025-01-01')`,
+      [org],
+    ),
+  locations: (q, org) =>
+    q.query(
+      `insert into locations (id, org_id, store_connection_id, external_id, name, type, source)
+       values ($1, $1, $1, 'loc-' || ($1::uuid)::text, 'Main warehouse', 'warehouse', 'shopify')`,
+      [org],
+    ),
+  inventory_levels: (q, org) =>
+    q.query(
+      `insert into inventory_levels (org_id, sku_id, location_id, on_hand) values ($1, $1, $1, 5)`,
+      [org],
+    ),
+  inventory_movements: (q, org) =>
+    q.query(
+      `insert into inventory_movements (org_id, sku_id, location_id, delta, reason) values ($1, $1, $1, 5, 'adjustment')`,
+      [org],
+    ),
+  sku_channel_listings: (q, org) =>
+    q.query(
+      `insert into sku_channel_listings (org_id, sku_id, store_connection_id, external_product_id, external_variant_id)
+       values ($1, $1, $1, 'p-1', 'v-1')`,
       [org],
     ),
 };

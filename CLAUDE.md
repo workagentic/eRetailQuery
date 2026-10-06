@@ -2,7 +2,7 @@
 
 Domain: eretailquery.com
 Owner: Abdullah Shekha
-Status: Greenfield. Build in the phases defined in section 12. Do not skip ahead.
+Status: Phase 0 (Foundations) built and reviewed on branch `phase0-foundations`; see section 16. Next is Phase 1, split into 1a metrics, 1b Shopify + CSV, 1c Meta/Google, 1d dashboard/P&L/Stripe. Build in the phases defined in section 12. Do not skip ahead.
 
 ---
 
@@ -451,6 +451,29 @@ When any of these block a decision, ask the owner rather than guessing.
 - When a platform API behavior is uncertain, check the official documentation rather than assuming, and note the doc link in a code comment.
 - Keep this file updated as decisions are made. Add a "Decisions Log" section at the bottom with date and rationale.
 - If a requirement here conflicts with security or data accuracy, raise it instead of silently picking one.
+
+---
+
+## 16. Current State (Phase 0 complete)
+
+Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`. Each later phase gets its own spec and plan. Read `docs/dev-setup.md` and `docs/architecture/tenancy.md` before changing the database, auth or CI.
+
+**Built:** pnpm/Turborepo monorepo (`apps/api`, `apps/web`, `apps/worker`; `packages/shared`, `db`, `ui`, `metrics` (empty), `connectors` (interfaces only)). Postgres schema with RLS for identity, audit log, connections, products, SKUs and time-versioned cost components. Supabase Auth with a NestJS API (`/me`, `/orgs`, members, invites), a BullMQ worker with a tenant-scoped job wrapper, a Next.js shell (sign in, onboarding, org switcher, team, invites), an idempotent demo seed, and a CI workflow.
+
+**Rules that are easy to break:**
+- Every tenant database call goes through `withTenant(orgId, fn)`. Every new tenant table needs a migration that calls `app_secure_tenant_table`, a fixture in `packages/db/test/fixtures.ts`, and composite `(org_id, id)` foreign keys to tenant parents. The isolation suite fails otherwise.
+- `app_user` (API and worker) must never be superuser or BYPASSRLS, and cannot insert or delete `orgs`. The migration role must be superuser or BYPASSRLS because the SECURITY DEFINER account functions rely on it.
+- New SECURITY DEFINER functions must set `search_path = pg_catalog, public, pg_temp`, revoke EXECUTE from PUBLIC, and be granted only to `app_user`.
+- Invite acceptance trusts the JWT `email` claim, so Supabase email confirmation must be enabled in production. Local e2e config disables it.
+- Apps must never import `@erq/db/admin` (ESLint enforces this).
+- Post-login redirects go through `safeNextPath`. Do not build redirect targets from user input any other way.
+- New API controllers must apply `AuthGuard`, `OrgGuard`, `RolesGuard` in that order on every route; guards are not global yet.
+
+**Commands:** `pnpm dev`, `pnpm db:migrate`, `pnpm db:seed`, `pnpm test`, `pnpm test:e2e`, `pnpm lint`, `pnpm typecheck`. On small disks run `pnpm turbo run test --concurrency=1`. Tests use Testcontainers when Docker is available, otherwise an embedded Postgres (`ERQ_TEST_DB=docker|embedded|auto`).
+
+**Not yet verified by running:** the BullMQ system-worker test, the Playwright e2e, live Supabase login and middleware flows, the seed CLI, and the CI workflow. The first CI run with Docker is their first execution.
+
+**Known deferred items:** global deny-by-default guard, `money(-0)` handling and extra money tests (Phase 1a), Swagger gating in production, worker shutdown robustness, UX polish on the web pages, and the seed slug `demo` colliding with a real org named "Demo".
 
 ---
 

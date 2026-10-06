@@ -255,7 +255,11 @@ importers:
         specifier: ^4.23.15
         version: 4.23.15
 
-  packages/metrics: {}
+  packages/metrics:
+    dependencies:
+      '@erq/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/shared:
     dependencies:

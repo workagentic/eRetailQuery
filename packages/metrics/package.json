@@ -12,5 +12,8 @@
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
+  },
+  "dependencies": {
+    "@erq/shared": "workspace:*"
   }
 }

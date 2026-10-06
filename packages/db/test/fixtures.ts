@@ -112,4 +112,16 @@ export const fixtures: Record<string, Fixture> = {
       `insert into sync_cursors (org_id, store_connection_id, resource, status) values ($1, $1, 'orders', 'idle')`,
       [org],
     ),
+  oauth_states: (q, org) =>
+    q.query(
+      `insert into oauth_states (org_id, user_id, platform, shop, nonce_hash, expires_at)
+       values ($1, gen_random_uuid(), 'shopify', 'fixture.myshopify.com', 'hash-' || ($1::uuid)::text, now() + interval '10 minutes')`,
+      [org],
+    ),
+  webhook_events: (q, org) =>
+    q.query(
+      `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload)
+       values ($1, $1, 'orders/updated', 'evt-' || ($1::uuid)::text, '{}')`,
+      [org],
+    ),
 };

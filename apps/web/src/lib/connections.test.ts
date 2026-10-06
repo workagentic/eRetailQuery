@@ -140,6 +140,9 @@ describe('suggestShopDomain', () => {
     ['', '', false],
     ['https://my-store.myshopify.com/admin?x=1#y', 'my-store.myshopify.com', true],
     ['HTTPS://My-Store.MyShopify.com/Admin', 'my-store.myshopify.com', true],
+    ['a-', 'a-.myshopify.com', false],
+    ['a'.repeat(63), `${'a'.repeat(63)}.myshopify.com`, true],
+    ['a'.repeat(64), `${'a'.repeat(64)}.myshopify.com`, false],
   ])('suggests %j as %j (valid: %s)', (input, value, valid) => {
     expect(suggestShopDomain(input)).toEqual({ value, valid });
   });

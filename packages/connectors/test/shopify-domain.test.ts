@@ -7,6 +7,7 @@ describe('isValidShopDomain', () => {
     'a.myshopify.com',
     'store123.myshopify.com',
     '0-x.myshopify.com',
+    `${'a'.repeat(63)}.myshopify.com`, // longest DNS label
   ])('accepts %s', (s) => expect(isValidShopDomain(s)).toBe(true));
   it.each([
     '',
@@ -27,6 +28,8 @@ describe('isValidShopDomain', () => {
     'ａ.myshopify.com',
     'xn--a.myshopify.com\n',
     `${'a'.repeat(250)}.myshopify.com`,
+    'a-.myshopify.com', // trailing hyphen
+    `${'a'.repeat(64)}.myshopify.com`, // label longer than 63
   ])('rejects %j', (s) => expect(isValidShopDomain(s)).toBe(false));
   it('normalizes only case and surrounding whitespace', () => {
     expect(normalizeShopInput('  My-Store.MyShopify.com ')).toBe('my-store.myshopify.com');

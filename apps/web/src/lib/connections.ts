@@ -93,7 +93,8 @@ export function describeConnection(c: ConnectionDto, now: Date): ConnectionView 
   }
 }
 
-const SHOP_RE = /^[a-z0-9][a-z0-9-]*\.myshopify\.com$/;
+// Mirror of SHOP_RE in packages/connectors/src/shopify/domain.ts (one DNS label); keep them identical.
+const SHOP_RE = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.myshopify\.com$/;
 
 // UI hint only; the server is authoritative.
 export function suggestShopDomain(input: string): { value: string; valid: boolean } {

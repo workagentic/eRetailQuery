@@ -58,17 +58,13 @@ describe('FakeConnector', () => {
     await expect(c.fetchPage(ctx, 'locations', null, {})).rejects.toThrow('flaky');
     await expect(c.fetchPage(ctx, 'locations', null, {})).resolves.toBeTruthy();
   });
-  it.each(['', ' 2 ', '1e1', '-1', '01', '1.5', 'abc'])(
+  it.each(['', ' 2 ', '1e1', '-1', '01', '1.5', 'abc', '99999999999999999999'])(
     'rejects the malformed cursor %j',
     async (bad) => {
       const fake = new FakeConnector(sampleData());
       await expect(fake.fetchPage(ctx, 'orders', bad, {})).rejects.toBeInstanceOf(PermanentError);
     },
   );
-  it('rejects an invalid cursor', async () => {
-    const c = new FakeConnector(sampleData(), 2);
-    await expect(c.fetchPage(ctx, 'locations', 'abc', {})).rejects.toBeInstanceOf(PermanentError);
-  });
 });
 
 describe('sampleData', () => {

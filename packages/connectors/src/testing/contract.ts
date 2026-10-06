@@ -93,14 +93,14 @@ export function validateNormalizedItem(resource: SyncResource, item: unknown): v
     nonEmpty(i.externalId, 'location.externalId');
     nonEmpty(i.name, 'location.name');
     expect(['warehouse', 'store', '3pl', 'fba', 'other']).toContain(i.type);
-    expect(typeof i.isActive).toBe('boolean');
+    expect(typeof i.isActive, 'location.isActive must be a boolean').toBe('boolean');
   } else if (resource === 'products') {
     onlyKeys(i, KEYS.products, 'product');
     nonEmpty(i.externalId, 'product.externalId');
     nonEmpty(i.title, 'product.title');
     date(i.updatedAt, 'product.updatedAt');
     expect(['active', 'draft', 'archived']).toContain(i.status);
-    expect(Array.isArray(i.variants)).toBe(true);
+    expect(Array.isArray(i.variants), 'product.variants must be an array').toBe(true);
     unique(
       i.variants.map((v: { externalId: string }) => v.externalId),
       'variant ids in a product',
@@ -131,7 +131,8 @@ export function validateNormalizedItem(resource: SyncResource, item: unknown): v
     expect(i.currency).toMatch(/^[A-Z]{3}$/);
     for (const k of ['grossCents', 'discountCents', 'shippingChargedCents', 'taxCents'])
       cents(i[k], `order.${k}`);
-    expect(Array.isArray(i.lines) && Array.isArray(i.refunds)).toBe(true);
+    expect(Array.isArray(i.lines), 'order.lines must be an array').toBe(true);
+    expect(Array.isArray(i.refunds), 'order.refunds must be an array').toBe(true);
     unique(
       i.lines.map((l: { externalLineId: string }) => l.externalLineId),
       'line ids in an order',
@@ -145,9 +146,15 @@ export function validateNormalizedItem(resource: SyncResource, item: unknown): v
       nonEmpty(l.externalLineId, 'line.externalLineId');
       cents(l.quantity, 'line.quantity', 1);
       cents(l.unitPriceCents, 'line.unitPriceCents');
-      expect(l.title === null || typeof l.title === 'string').toBe(true);
+      expect(
+        l.title === null || typeof l.title === 'string',
+        'line.title must be a string or null',
+      ).toBe(true);
       cents(l.discountCents, 'line.discountCents');
-      expect(l.discountCents).toBeLessThanOrEqual(l.quantity * l.unitPriceCents);
+      expect(
+        l.discountCents <= l.quantity * l.unitPriceCents,
+        'line.discountCents must not exceed the line total',
+      ).toBe(true);
     }
     for (const r of i.refunds) {
       onlyKeys(r, KEYS.refund, 'refund');
@@ -155,8 +162,8 @@ export function validateNormalizedItem(resource: SyncResource, item: unknown): v
       date(r.refundedAt, 'refund.refundedAt');
       cents(r.amountCents, 'refund.amountCents');
       cents(r.shippingRefundCents, 'refund.shippingRefundCents');
-      expect(typeof r.restock).toBe('boolean');
-      expect(Array.isArray(r.lines)).toBe(true);
+      expect(typeof r.restock, 'refund.restock must be a boolean').toBe('boolean');
+      expect(Array.isArray(r.lines), 'refund.lines must be an array').toBe(true);
       for (const rl of r.lines) {
         onlyKeys(rl, KEYS.refundLine, 'refund line');
         nonEmpty(rl.externalLineId, 'refundLine.externalLineId');

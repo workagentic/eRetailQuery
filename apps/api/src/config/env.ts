@@ -10,6 +10,14 @@ const schema = z
     SUPABASE_JWKS_URL: z.string().url().optional(),
     SUPABASE_JWT_SECRET: z.string().min(1).optional(),
     LOG_LEVEL: z.string().default('info'),
+    API_PUBLIC_URL: z.string().url().optional(),
+    REDIS_URL: z.string().min(1).optional(),
+    ENCRYPTION_KEY_ID: z.string().min(1).optional(),
+    ENCRYPTION_KEY: z.string().min(1).optional(),
+    ENCRYPTION_OLD_KEYS: z.string().min(1).optional(),
+    SHOPIFY_API_KEY: z.string().min(1).optional(),
+    SHOPIFY_API_SECRET: z.string().min(1).optional(),
+    SHOPIFY_SCOPES: z.string().default('read_products,read_inventory,read_locations,read_orders'),
   })
   .refine((v) => v.SUPABASE_JWKS_URL || v.SUPABASE_JWT_SECRET, {
     message: 'Set SUPABASE_JWKS_URL or SUPABASE_JWT_SECRET',

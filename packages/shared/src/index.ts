@@ -4,3 +4,5 @@ export * from './logger';
 export * from './schemas';
 export * from './slug';
 export * from './api-types';
+export * from './connections';
+export * from './webhooks';

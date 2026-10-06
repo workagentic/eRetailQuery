@@ -26,4 +26,13 @@ describe('loadEnv', () => {
   it('rejects a missing database url', () => {
     expect(() => loadEnv({ ...base, DATABASE_URL: undefined, SUPABASE_JWT_SECRET: 's' })).toThrow();
   });
+  it('treats Shopify and encryption keys as optional with default scopes', () => {
+    const env = loadEnv({ ...base, SUPABASE_JWT_SECRET: 's' });
+    expect(env.SHOPIFY_API_KEY).toBeUndefined();
+    expect(env.ENCRYPTION_KEY).toBeUndefined();
+    expect(env.SHOPIFY_SCOPES).toBe('read_products,read_inventory,read_locations,read_orders');
+  });
+  it('rejects a non-URL API_PUBLIC_URL', () => {
+    expect(() => loadEnv({ ...base, SUPABASE_JWT_SECRET: 's', API_PUBLIC_URL: 'nope' })).toThrow();
+  });
 });

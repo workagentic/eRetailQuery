@@ -29,7 +29,11 @@ export interface TestApp {
 }
 
 export async function createTestApp(
-  opts: { extraControllers?: Type<unknown>[] } = {},
+  opts: {
+    extraControllers?: Type<unknown>[];
+    env?: Record<string, string>;
+    overrides?: { provide: unknown; useValue: unknown }[];
+  } = {},
 ): Promise<TestApp> {
   const tdb = await startTestDatabase();
   try {
@@ -40,14 +44,16 @@ export async function createTestApp(
       SUPABASE_JWT_ISSUER: ISSUER,
       SUPABASE_JWT_SECRET: 'unused-in-tests',
       LOG_LEVEL: 'silent',
+      ...opts.env,
     });
-    const moduleRef = await Test.createTestingModule({
+    const builder = Test.createTestingModule({
       imports: [AppModule.register(env, { controllers: opts.extraControllers })],
     })
       .overrideProvider(JWT_VERIFIER)
-      .useValue(createJoseVerifier({ key: publicKey, issuer: ISSUER, algorithms: ['ES256'] }))
-      .compile();
-    const app = moduleRef.createNestApplication();
+      .useValue(createJoseVerifier({ key: publicKey, issuer: ISSUER, algorithms: ['ES256'] }));
+    for (const o of opts.overrides ?? []) builder.overrideProvider(o.provide).useValue(o.useValue);
+    const moduleRef = await builder.compile();
+    const app = moduleRef.createNestApplication({ rawBody: true });
     await app.init();
     return {
       app,

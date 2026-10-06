@@ -10,7 +10,7 @@ dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 async function main(): Promise<void> {
   const env = loadEnv(process.env);
-  const app = await NestFactory.create(AppModule.register(env));
+  const app = await NestFactory.create(AppModule.register(env), { rawBody: true });
   app.enableCors({
     origin: env.WEB_PUBLIC_URL,
     allowedHeaders: ['authorization', 'content-type', 'x-org-id'],

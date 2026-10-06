@@ -41,6 +41,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@erq/connectors':
+        specifier: workspace:*
+        version: link:../../packages/connectors
       '@erq/db':
         specifier: workspace:*
         version: link:../../packages/db
@@ -59,6 +62,9 @@ importers:
       '@nestjs/swagger':
         specifier: ^11.4.7
         version: 11.4.7(@nestjs/common@11.2.7(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@8.1.1))(@nestjs/core@11.2.7)(reflect-metadata@0.2.2)
+      bullmq:
+        specifier: ^6.3.11
+        version: 6.3.11(ioredis@6.0.0(supports-color@8.1.1))(pg@8.23.1)
       dotenv:
         specifier: ^18.0.5
         version: 18.0.5
@@ -68,6 +74,9 @@ importers:
       express:
         specifier: ^5.2.1
         version: 5.2.1(supports-color@8.1.1)
+      ioredis:
+        specifier: ^6.0.0
+        version: 6.0.0(supports-color@8.1.1)
       jose:
         specifier: ^5.10.0
         version: 5.10.0

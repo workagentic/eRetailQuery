@@ -157,6 +157,43 @@ describe('inventory_movements (append-only ledger)', () => {
       db.withTenant(A, (tx) => tx.execute(sql.raw(`delete from inventory_movements`))),
     ).rejects.toMatchObject(denied);
   });
+  it('blocks deleting a sku or location that has movements, but not one without', async () => {
+    const S2 = '33333333-3333-4333-8333-333333333333';
+    const L2 = '44444444-4444-4444-8444-444444444444';
+    await owner.query(
+      `insert into skus (id, org_id, product_id, sku_code, selling_price_cents) values ($2, $1, $1, 'SKU-DEL', 100)`,
+      [A, S2],
+    );
+    await owner.query(
+      `insert into locations (id, org_id, store_connection_id, external_id, name, type, source) values ($2, $1, $1, 'loc-del', 'Del', 'warehouse', 'shopify')`,
+      [A, L2],
+    );
+    await owner.query(
+      `insert into inventory_movements (org_id, sku_id, location_id, delta, reason) values ($1, $2, $3, 1, 'adjustment')`,
+      [A, S2, L2],
+    );
+    const restricted = { cause: { message: expect.stringMatching(/foreign key constraint/) } };
+    await expect(
+      db.withTenant(A, (tx) => tx.execute(sql.raw(`delete from skus where id = '${S2}'`))),
+    ).rejects.toMatchObject(restricted);
+    await expect(
+      db.withTenant(A, (tx) => tx.execute(sql.raw(`delete from locations where id = '${L2}'`))),
+    ).rejects.toMatchObject(restricted);
+
+    // Rows without movements can still be deleted.
+    const S3 = '55555555-5555-4555-8555-555555555555';
+    const L3 = '66666666-6666-4666-8666-666666666666';
+    await owner.query(
+      `insert into skus (id, org_id, product_id, sku_code, selling_price_cents) values ($2, $1, $1, 'SKU-FREE', 100)`,
+      [A, S3],
+    );
+    await owner.query(
+      `insert into locations (id, org_id, store_connection_id, external_id, name, type, source) values ($2, $1, $1, 'loc-free', 'Free', 'warehouse', 'shopify')`,
+      [A, L3],
+    );
+    await db.withTenant(A, (tx) => tx.execute(sql.raw(`delete from skus where id = '${S3}'`)));
+    await db.withTenant(A, (tx) => tx.execute(sql.raw(`delete from locations where id = '${L3}'`)));
+  });
 });
 
 describe('sku_channel_listings', () => {

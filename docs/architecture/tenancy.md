@@ -38,7 +38,7 @@ The migration role must be a superuser or have BYPASSRLS, because these function
 
 `audit_log` is append-only for `app_user`: UPDATE and DELETE are revoked, and tests assert it. Caveat: its `org_id` foreign key is `ON DELETE CASCADE`, so deleting an org (as the seed does, as `erq_owner`) also deletes that org's audit rows. `app_user` can no longer INSERT or DELETE `orgs` either (migration 0006): orgs are created only through the SECURITY DEFINER `app_create_org`, and deleted only by the owner role, so the audit log cannot be wiped through the cascade. Org deletion is therefore an owner-role operation outside normal traffic; if audit retention beyond org lifetime is required, change the FK before enabling org deletion in the product.
 
-`inventory_movements` (migration 0009) is append-only for `app_user` too: UPDATE and DELETE are revoked, the table has no `updated_at`, and a partial unique index on its reference columns makes sync writes idempotent.
+`inventory_movements` (migration 0009) is append-only for `app_user` too: UPDATE and DELETE are revoked, the table has no `updated_at`, and a partial unique index on its reference columns makes sync writes idempotent. Its foreign keys to `skus` and `locations` are `ON DELETE NO ACTION` (restrict), because referential cascades bypass RLS and the revoked grants and would otherwise let a SKU or location delete wipe the history. Since `locations` cascade from `store_connections`, a store connection that has movements cannot be deleted either: disconnecting a store must be a status change, not a row delete (movements and, later, orders reference it).
 
 ## Invite tokens
 

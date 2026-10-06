@@ -113,13 +113,14 @@ export const inventoryMovements = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [
+    // The ledger is append-only: no cascade, or deleting a sku or location would erase history (cascades bypass RLS and REVOKE).
     foreignKey({ columns: [t.orgId, t.skuId], foreignColumns: [skus.orgId, skus.id] }).onDelete(
-      'cascade',
+      'no action',
     ),
     foreignKey({
       columns: [t.orgId, t.locationId],
       foreignColumns: [locations.orgId, locations.id],
-    }).onDelete('cascade'),
+    }).onDelete('no action'),
     check('inventory_movements_delta_nonzero', sql`${t.delta} <> 0`),
     uniqueIndex('inventory_movements_ref_uq')
       .on(t.orgId, t.refType, t.refId, t.skuId, t.locationId, t.reason)

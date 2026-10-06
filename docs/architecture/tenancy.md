@@ -30,11 +30,15 @@ Trust model: the functions trust their arguments. `app_create_org` and `app_list
 
 `pg_temp` must be last in the pinned `search_path`: when it is implicit or first, a session can create a temp table such as `invites` that shadows the real table inside a SECURITY DEFINER function. Migration 0006 also revokes EXECUTE on the two helper functions (`app_secure_tenant_table`, `app_set_updated_at`) from PUBLIC, and revokes all table and function privileges in `public` from the Supabase roles `anon` and `authenticated` (including their default privileges), since `REVOKE ... FROM PUBLIC` does not remove explicit grants.
 
+Migration `0011_sync_orders_rls.sql` adds a fourth, `app_list_stalled_sync_cursors(older_than)`. It is the only intentional cross-tenant read: it lists `running` sync cursors across all orgs that have not moved since the threshold, so the worker's stalled-run resumer (which has no org context) can re-enqueue them. It returns only ids. It must never be exposed through an API route.
+
 The migration role must be a superuser or have BYPASSRLS, because these functions write across RLS-protected tables. Supabase's `postgres` role qualifies.
 
 ## Audit log
 
 `audit_log` is append-only for `app_user`: UPDATE and DELETE are revoked, and tests assert it. Caveat: its `org_id` foreign key is `ON DELETE CASCADE`, so deleting an org (as the seed does, as `erq_owner`) also deletes that org's audit rows. `app_user` can no longer INSERT or DELETE `orgs` either (migration 0006): orgs are created only through the SECURITY DEFINER `app_create_org`, and deleted only by the owner role, so the audit log cannot be wiped through the cascade. Org deletion is therefore an owner-role operation outside normal traffic; if audit retention beyond org lifetime is required, change the FK before enabling org deletion in the product.
+
+`inventory_movements` (migration 0009) is append-only for `app_user` too: UPDATE and DELETE are revoked, the table has no `updated_at`, and a partial unique index on its reference columns makes sync writes idempotent.
 
 ## Invite tokens
 

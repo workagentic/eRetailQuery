@@ -458,7 +458,7 @@ When any of these block a decision, ask the owner rather than guessing.
 
 Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`. Each later phase gets its own spec and plan. Read `docs/dev-setup.md` and `docs/architecture/tenancy.md` before changing the database, auth or CI.
 
-**Built:** pnpm/Turborepo monorepo (`apps/api`, `apps/web`, `apps/worker`; `packages/shared`, `db`, `ui`, `metrics` (pricing, ad flags, inventory flags, monthly P&L: see docs/metrics.md), `connectors` (interfaces only)). Postgres schema with RLS for identity, audit log, connections, products, SKUs and time-versioned cost components. Supabase Auth with a NestJS API (`/me`, `/orgs`, members, invites), a BullMQ worker with a tenant-scoped job wrapper, a Next.js shell (sign in, onboarding, org switcher, team, invites), an idempotent demo seed, and a CI workflow.
+**Built:** pnpm/Turborepo monorepo (`apps/api`, `apps/web`, `apps/worker`; `packages/shared`, `db`, `ui`, `metrics` (pricing, ad flags, inventory flags, monthly P&L: see docs/metrics.md), `connectors` (page-based `fetchPage` contract, typed errors, credential helpers, registry, fake connector and contract suite), `sync` (page-job engine and idempotent sinks: see docs/sync.md)). Postgres schema with RLS for identity, audit log, connections, products, SKUs, time-versioned cost components, and (Phase 1b-1) locations, inventory levels and movements, channel listings, orders, order lines, refunds and sync cursors. Supabase Auth with a NestJS API (`/me`, `/orgs`, members, invites), a BullMQ worker with a tenant-scoped job wrapper, a Next.js shell (sign in, onboarding, org switcher, team, invites), an idempotent demo seed, and a CI workflow.
 
 **Rules that are easy to break:**
 - Every tenant database call goes through `withTenant(orgId, fn)`. Every new tenant table needs a migration that calls `app_secure_tenant_table`, a fixture in `packages/db/test/fixtures.ts`, and composite `(org_id, id)` foreign keys to tenant parents. The isolation suite fails otherwise.
@@ -466,12 +466,14 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - New SECURITY DEFINER functions must set `search_path = pg_catalog, public, pg_temp`, revoke EXECUTE from PUBLIC, and be granted only to `app_user`.
 - Invite acceptance trusts the JWT `email` claim, so Supabase email confirmation must be enabled in production. Local e2e config disables it.
 - Apps must never import `@erq/db/admin` (ESLint enforces this).
+- Sync sinks must be idempotent and respect `external_updated_at` (an older update never overwrites newer data). A sync cursor never advances without its data: both commit in the same transaction. Connectors never touch the database.
+- Connection credentials are encrypted with AAD `connection:<id>` and never travel in job data. `app_list_stalled_sync_cursors` is the only intentional cross-tenant read; never expose it through an API route.
 - Post-login redirects go through `safeNextPath`. Do not build redirect targets from user input any other way.
 - New API controllers must apply `AuthGuard`, `OrgGuard`, `RolesGuard` in that order on every route; guards are not global yet.
 
 **Commands:** `pnpm dev`, `pnpm db:migrate`, `pnpm db:seed`, `pnpm test`, `pnpm test:e2e`, `pnpm lint`, `pnpm typecheck`. On small disks run `pnpm turbo run test --concurrency=1`. Tests use Testcontainers when Docker is available, otherwise an embedded Postgres (`ERQ_TEST_DB=docker|embedded|auto`).
 
-**Not yet verified by running:** the BullMQ system-worker test, the Playwright e2e, live Supabase login and middleware flows, the seed CLI, and the CI workflow. The first CI run with Docker is their first execution.
+**Not yet verified by running:** the Redis rate limiter, the BullMQ sync queue and the sync worker (no Redis or Docker in dev), the BullMQ system-worker test, the Playwright e2e, live Supabase login and middleware flows, the seed CLI, and the CI workflow. The first CI run with Docker is their first execution.
 
 **Known deferred items:** global deny-by-default guard, `money(-0)` handling and extra money tests (Phase 1a), Swagger gating in production, worker shutdown robustness, UX polish on the web pages, and the seed slug `demo` colliding with a real org named "Demo".
 
@@ -499,3 +501,9 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - 2026-10-05: Known unverified at merge: the BullMQ system-worker test and the Playwright e2e were never run, because the dev environment had no Docker or Supabase. The first CI run is their first real execution.
 - 2026-10-06: Migration 0006 hardens the database: SECURITY DEFINER functions pin `search_path = pg_catalog, public, pg_temp` (pg_temp last), `anon` and `authenticated` (Supabase) lose all privileges in `public`, helper functions lose PUBLIC execute, and `app_user` can no longer INSERT or DELETE `orgs`. pnpm 11 `allowBuilds` must list every `@embedded-postgres/*` platform package explicitly (strictDepBuilds), otherwise installs fail on Linux and macOS.
 - 2026-10-06: Metrics conventions (Phase 1a): percentages are integer basis points, ROAS is a plain number, "losing" means the trailing-7-day total ROAS is below break-even, default minimum contribution is 15%, default stock buffer is 7 days, and velocity weights are 50/30/20 over 7, 30 and 90 days. See docs/metrics.md.
+- 2026-10-06: Sync is a chain of small page jobs. The cursor is committed in the same transaction as the page data, and the next job is enqueued after commit (docs/sync.md).
+- 2026-10-06: Orders carry only an opaque customer external id in Phase 1; the customers table comes in Phase 2.
+- 2026-10-06: One currency per org in Phase 1. Orders in another currency are stored with their currency but no FX conversion exists yet.
+- 2026-10-06: Shopify cost import never overwrites existing costs. It writes a `product_cost` component only when the SKU has none.
+- 2026-10-06: Order dates used for cost snapshots are taken in the org timezone.
+- 2026-10-06: Stalled sync runs are found through the SECURITY DEFINER function `app_list_stalled_sync_cursors`, because the resumer has no org context.

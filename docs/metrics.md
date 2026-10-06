@@ -32,6 +32,8 @@ effectiveFrom <= asOf < effectiveTo        (effectiveTo = null means open-ended)
 
 so `effectiveFrom` is inclusive and `effectiveTo` is exclusive. A component ending on 2026-03-01 does not apply on 2026-03-01, and a replacement starting on 2026-03-01 does. This is how historical orders get the cost that was true on their date. Costs per batch must be converted to per unit by the caller: a component with `perUnit: false` throws `RangeError` (`perUnit` may be `true` or omitted). `asOf`, every `effectiveFrom` and every non-null `effectiveTo` must match `YYYY-MM-DD` (otherwise `RangeError`), and every component must be in `currency`.
 
+`isCostInEffect(component, asOf)` is the single rule for time-versioned costs: a component is in effect when `effectiveFrom <= asOf < effectiveTo` (`effectiveTo` null means open-ended). `landedCost` and the sync engine's order-line cost snapshots both use it.
+
 ### 2.2 `skuPricing({ price, discount?, landed, fulfillment?, config? })`
 
 Defaults (`DEFAULT_PRICING_CONFIG`): `targetMarkupLow = 5000` (50%), `targetMarkupHigh = 10000` (100%), `minContribution = 1500` (15%). `config` is a partial override.

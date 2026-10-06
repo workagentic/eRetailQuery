@@ -1,10 +1,10 @@
 import { and, eq } from 'drizzle-orm';
+import { sanitizeMessage } from '@erq/connectors';
 import { storeConnections, syncCursors, syncRuns, type Tx } from '@erq/db';
 import type { SyncPageJob } from '../ports';
 import { nowOf, type SyncDeps } from './deps';
 
-export const safeMessage = (error: unknown): string =>
-  (error instanceof Error ? error.message : String(error)).slice(0, 500);
+export const safeMessage = (error: unknown): string => sanitizeMessage(error, 500);
 
 /** Marks the job's run and cursor failed (only if that run is still the current one). Optionally flags the connection. */
 export async function failRun(

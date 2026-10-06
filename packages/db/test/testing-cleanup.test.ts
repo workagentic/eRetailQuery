@@ -4,6 +4,9 @@ import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
 import { cleanupLeakedDatabases, startTestDatabase } from '../src/testing';
 
+// These tests start their databases inside `it`, so they need the long timeout the other files give `beforeAll`.
+const LONG = { timeout: 180_000 };
+
 function pidOf(dir: string): number | undefined {
   try {
     return Number(readFileSync(path.join(dir, 'postmaster.pid'), 'utf8').split('\n')[0]);
@@ -19,53 +22,63 @@ async function waitDead(pid: number, ms = 5000): Promise<boolean> {
   }
   return !alive(pid);
 }
-/** Pids of all descendants of root (recursive), or undefined if no process listing tool works. */
-function descendantsOf(root: number): number[] | undefined {
+
+/** Direct children of each pid in the process table, or undefined if no process listing tool works. */
+function childrenMap(): Map<number, number[]> | undefined {
   try {
-    const out: number[] = [];
-    if (process.platform === 'win32') {
-      const text = execFileSync(
-        'powershell',
-        [
-          '-NoProfile',
-          '-Command',
-          'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
-        ],
-        { encoding: 'utf8', windowsHide: true },
-      );
-      const kids = new Map<number, number[]>();
-      for (const line of text.split('\n')) {
-        const [pid, ppid] = line.trim().split(' ').map(Number);
-        if (!pid || !ppid) continue;
-        kids.set(ppid, [...(kids.get(ppid) ?? []), pid]);
-      }
-      const walk = (p: number): void => {
-        for (const k of kids.get(p) ?? []) {
-          out.push(k);
-          walk(k);
-        }
-      };
-      walk(root);
-      return out;
+    const kids = new Map<number, number[]>();
+    const text =
+      process.platform === 'win32'
+        ? execFileSync(
+            'powershell',
+            [
+              '-NoProfile',
+              '-NonInteractive',
+              '-Command',
+              'Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId) $($_.ParentProcessId)" }',
+            ],
+            { encoding: 'utf8', windowsHide: true, timeout: 20_000 },
+          )
+        : execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8', timeout: 20_000 });
+    for (const line of text.split('\n')) {
+      const [pid, ppid] = line.trim().split(/\s+/).map(Number);
+      if (!pid || !ppid) continue;
+      kids.set(ppid, [...(kids.get(ppid) ?? []), pid]);
     }
-    const walk = (p: number): void => {
-      let text = '';
-      try {
-        text = execFileSync('pgrep', ['-P', String(p)], { encoding: 'utf8' });
-      } catch (e) {
-        if ((e as { status?: number }).status !== 1) throw e; // 1 = no children
-      }
-      for (const k of text.split('\n').filter(Boolean).map(Number)) {
-        out.push(k);
-        walk(k);
-      }
-    };
-    walk(root);
-    return out;
+    return kids;
   } catch {
     return undefined;
   }
 }
+
+/**
+ * Pids of all descendants of root (recursive), or undefined if listing is unavailable. Works for a DEAD root too:
+ * orphans keep their parent pid on Windows (on POSIX they are re-parented, which the pre-stop snapshot covers).
+ */
+function descendantsOf(root: number): number[] | undefined {
+  const kids = childrenMap();
+  if (!kids) return undefined;
+  const out: number[] = [];
+  const walk = (p: number): void => {
+    for (const k of kids.get(p) ?? []) {
+      out.push(k);
+      walk(k);
+    }
+  };
+  walk(root);
+  return out;
+}
+
+/** Polls until root has no descendants left; returns the survivors (empty when clean). */
+async function waitNoDescendants(root: number, ms = 5000): Promise<number[]> {
+  const end = Date.now() + ms;
+  for (;;) {
+    const left = (descendantsOf(root) ?? []).filter(alive);
+    if (left.length === 0 || Date.now() >= end) return left;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+}
+
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -77,12 +90,14 @@ function alive(pid: number): boolean {
 
 describe('embedded test database cleanup', () => {
   const prev = process.env.ERQ_TEST_DB;
+  // Reaps anything a failed or timed-out test left running.
+  afterAll(cleanupLeakedDatabases);
   afterAll(() => {
     if (prev === undefined) delete process.env.ERQ_TEST_DB;
     else process.env.ERQ_TEST_DB = prev;
   });
 
-  it('stop() removes the data directory and kills the server', async () => {
+  it('stop() removes the data directory and kills the server and every child', LONG, async () => {
     process.env.ERQ_TEST_DB = 'embedded';
     const db = await startTestDatabase();
     const dir = db.dataDir!;
@@ -96,17 +111,26 @@ describe('embedded test database cleanup', () => {
     expect(await waitDead(pid)).toBe(true);
     for (const kid of kids ?? [])
       expect(await waitDead(kid), `child ${kid} still running`).toBe(true);
+    // Re-query AFTER the stop: catches children respawned during the kill (crash recovery), which the
+    // pre-stop snapshot cannot contain.
+    if (kids !== undefined)
+      expect(await waitNoDescendants(pid), 'orphans left after stop').toEqual([]);
     expect(existsSync(dir)).toBe(false);
   });
 
-  it('cleanupLeakedDatabases() reaps a database that was never stopped', async () => {
+  it('cleanupLeakedDatabases() reaps a database that was never stopped', LONG, async () => {
     process.env.ERQ_TEST_DB = 'embedded';
     const db = await startTestDatabase();
     const dir = db.dataDir!;
     const pid = pidOf(dir)!;
+    const kids = descendantsOf(pid);
     cleanupLeakedDatabases();
     expect(existsSync(dir)).toBe(false);
     expect(await waitDead(pid)).toBe(true);
+    for (const kid of kids ?? [])
+      expect(await waitDead(kid), `child ${kid} still running`).toBe(true);
+    if (kids !== undefined)
+      expect(await waitNoDescendants(pid), 'orphans left after cleanup').toEqual([]);
     cleanupLeakedDatabases(); // idempotent
   });
 });

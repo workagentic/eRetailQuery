@@ -49,6 +49,19 @@ describe('exchangeCodeForToken', () => {
     http.failNext(429, { 'retry-after': '3' });
     await expect(exchangeCodeForToken(http, p)).rejects.toMatchObject({ retryAfterMs: 3000 });
   });
+  it.each([[''], ['   '], ['soon'], ['-5']])(
+    'treats a retry-after of %j as missing (2000 ms)',
+    async (value) => {
+      const http = new FakeShopify();
+      http.failNext(429, { 'retry-after': value });
+      await expect(exchangeCodeForToken(http, p)).rejects.toMatchObject({ retryAfterMs: 2000 });
+    },
+  );
+  it('treats a missing retry-after as 2000 ms', async () => {
+    const http = new FakeShopify();
+    http.failNext(429);
+    await expect(exchangeCodeForToken(http, p)).rejects.toMatchObject({ retryAfterMs: 2000 });
+  });
   it('rejects an invalid shop before any request and never leaks secrets in errors', async () => {
     const http = new FakeShopify();
     await expect(exchangeCodeForToken(http, { ...p, shop: 'evil.com' })).rejects.toBeInstanceOf(

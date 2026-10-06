@@ -24,7 +24,9 @@ export async function exchangeCodeForToken(
   if (res.status === 401 || res.status === 403)
     throw new AuthError('Shopify rejected the app credentials');
   if (res.status === 429) {
-    const seconds = Number(res.headers['retry-after']);
+    // Blank, non-numeric or negative values count as missing (Number('') would be 0).
+    const raw = res.headers['retry-after']?.trim() ?? '';
+    const seconds = raw === '' ? NaN : Number(raw);
     throw new RateLimitedError(Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 2000);
   }
   if (res.status >= 500) throw new TransientError('Shopify is temporarily unavailable');

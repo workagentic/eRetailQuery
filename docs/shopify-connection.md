@@ -1,6 +1,6 @@
-# Shopify connection (Phase 1b-2, hardened in 1b-3a)
+# Shopify connection (Phase 1b-2, hardened in 1b-3a, data import in 1b-3b)
 
-This document describes what 1b-2 built and 1b-3a hardened: connecting a Shopify store to an org, storing the access token encrypted, receiving and storing webhooks, and handling uninstall and the mandatory privacy webhooks. It does not fetch any Shopify data (that is 1b-3). Everything below was built and tested against fakes; nothing has run against real Shopify (see section 8).
+This document describes how a Shopify store is connected to an org (1b-2, hardened in 1b-3a): the access token is stored encrypted, webhooks are received and stored, and uninstall and the mandatory privacy webhooks are handled. Section 9 describes what 1b-3b added: the connector that imports locations, products with unit costs, inventory and orders, and Sync now. Section 10 is the first-install checklist. Everything was built and tested against fakes; nothing has run against real Shopify (see sections 8 and 10).
 
 ## 1. Overview
 
@@ -48,9 +48,9 @@ Create an app in the Shopify Partner organisation (Dev Dashboard) and put these 
 | App client secret | `SHOPIFY_API_SECRET` |
 | Allowed redirection URL `${WEB_PUBLIC_URL}/connections/shopify/callback` (the WEB app, not the API) | App configuration (Dev Dashboard or `shopify.app.toml`). It must exactly match, because `redirectUri` is built from `WEB_PUBLIC_URL` with trailing slashes removed. The user must be signed in to eRetailQuery to complete a connection. |
 | Compliance webhooks `customers/data_request`, `customers/redact`, `shop/redact` with URI `${API_PUBLIC_URL}/webhooks/shopify` (`API_PUBLIC_URL` is still needed for the webhook URL) | App configuration (`[[webhooks.subscriptions]]` with `compliance_topics` in `shopify.app.toml`). The same endpoint also receives the per-shop `app/uninstalled` subscription the callback registers. |
-| Scopes | App configuration must include the scopes in `SHOPIFY_SCOPES` (default `read_products,read_inventory,read_locations,read_orders`, comma separated). |
+| Scopes | App configuration must include the scopes in `SHOPIFY_SCOPES` (default `read_products,read_inventory,read_locations,read_orders,read_all_orders`, comma separated). `read_all_orders` may need Shopify's approval; without it the order history is limited to 60 days (section 9.2). |
 
-Protected customer data access is a separate approval in the Partner dashboard and is **not** requested in 1b-2: no customer scopes are asked for and no customer PII is stored. For the same reason 1b-2 subscribes each shop to `app/uninstalled` only (`SHOPIFY_WEBHOOK_TOPICS`); the order, refund, product and stock topics (`SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS`) carry customer data, likely need that approval, and are subscribed in 1b-3 together with their consumption.
+Protected customer data access is a separate approval in the Partner dashboard and is **not** requested (1b-2 and 1b-3b): no customer scopes are asked for and no customer PII is stored. For the same reason 1b-2 subscribes each shop to `app/uninstalled` only (`SHOPIFY_WEBHOOK_TOPICS`); the order, refund, product and stock topics (`SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS`) carry customer data, likely need that approval, and are subscribed in 1b-3 together with their consumption.
 
 The endpoint must use HTTPS with a valid certificate and answer 401 on a bad HMAC (it does).
 
@@ -67,12 +67,12 @@ Could not confirm: where exactly in the current Dev Dashboard UI the redirect UR
 |---|---|---|---|
 | `API_PUBLIC_URL` | API | optional | Shopify is disabled (config is null). Public base URL of the API, used for the webhook URL. |
 | `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET` | API | optional | Shopify disabled. |
-| `SHOPIFY_SCOPES` | API | optional | Defaults to the four read scopes above. |
+| `SHOPIFY_SCOPES` | API | optional | Defaults to the five read scopes above. |
 | `ENCRYPTION_KEY_ID`, `ENCRYPTION_KEY` | API | optional | No key provider: install and callback return `not_configured` or 503. Webhook receiving needs only the Shopify config. |
 | `ENCRYPTION_OLD_KEYS` | API | optional | Retired keys are not available for decrypting old ciphertext. |
-| `REDIS_URL` | API | optional | Events are stored but not enqueued (a no-op queue); the worker sweep processes them after the stale window. |
+| `REDIS_URL` | API, worker | optional | API without it: webhook events are stored but not enqueued (the worker sweep processes them after the stale window), and no sync can start (Sync now answers 503 `sync_not_available`; the connect callback records "Could not start the first import. Use Sync now."). The worker needs it for the sync and webhook queues. |
 | `WEB_PUBLIC_URL` | API | required | Host of the OAuth redirect URI (`${WEB_PUBLIC_URL}/connections/shopify/callback`) and base of the redirect after the callback. |
-| `SHOPIFY_API_VERSION` | not an env var | n/a | The version is the constant `SHOPIFY_API_VERSION` in `packages/connectors/src/shopify/config.ts` (currently `2025-07`). Review it when upgrading. |
+| `SHOPIFY_API_VERSION` | worker | optional | Admin API version for the sync queries, format `YYYY-MM`. Empty means the built-in default, the constant `SHOPIFY_API_VERSION` in `packages/connectors/src/shopify/config.ts` (currently `2025-07`). Only the worker reads the variable; the API always uses the built-in default (for the webhook subscription call). Review the default when upgrading. |
 
 All keys are listed with empty placeholders in `.env.example`. An empty value is treated as unset. With Shopify unconfigured the app still boots; the install route returns 503 `shopify_not_configured`.
 
@@ -135,7 +135,7 @@ The token is stored in `store_connections.encrypted_credentials` as AES-256-GCM 
 
 ## 7. Privacy and data removal
 
-Held: connection metadata (shop domain, scopes, status, errors), encrypted token, hashed OAuth states, and webhook event rows (topic, ids, status; the payload is always `{}`). No customer PII is stored in 1b-2: no data topics are subscribed and no webhook body is ever persisted.
+Held: connection metadata (shop domain, scopes, status, errors), encrypted token, hashed OAuth states, and webhook event rows (topic, ids, status; the payload is always `{}`). No customer PII is stored: no data topics are subscribed, no webhook body is ever persisted, and the 1b-3b import never queries customer fields (section 9.1). Imported orders, products and inventory are business data and are purged with the connection by `shop/redact`.
 
 `shop/redact` runs `app_purge_shop(platform, shop)` (migrations 0017 and 0018; SECURITY DEFINER, worker only). It selects every connection of that platform and shop in every org whose status is `disconnected` or `error`, locking the rows `FOR UPDATE` (a concurrent reinstall cannot be purged; the status is re-checked per row), and calls `app_purge_store_connection` for each. It never touches an `active`, `pending` or `demo` connection, and returns the number purged. For each connection that deletes the inventory movements (the one intended path that removes ledger rows), sync runs, the shop's oauth states (filtered by org, platform and shop), and the connection row, which cascades to locations, levels, listings, orders, lines, refunds, cursors and webhook events. It does not delete the org's catalog (products, SKUs) or cost data. It writes one audit row `store_connection.purged` (reason `shop_redact`) per org purged. Uninstall and privacy requests also write audit rows (`connection.uninstalled`, `privacy.request_recorded`, topic only).
 
@@ -151,15 +151,113 @@ Held: connection metadata (shop domain, scopes, status, errors), encrypted token
 ### Open items
 
 - **OAuth signature form.** Both the encoded and decoded signed forms are accepted (section 4); verify on the first real install and drop one.
-- **Failed events are never swept.** Events that end `failed` after 5 BullMQ attempts are not picked up by the sweep, including privacy topics. Sweep or alert on them before 1b-3b ingests data.
+- **Failed events are never swept.** Events that end `failed` after 5 BullMQ attempts are not picked up by the sweep, including privacy topics. 1b-3b now imports order data, so sweep or alert on them soon (1b-3c).
 - **A lost `app/uninstalled` leaves the connection active.** If `app/uninstalled` exhausts its retries, the connection stays `active`, so a later `shop/redact` purges nothing (`app_purge_shop` never touches an active connection). The worker then still closes the event as `processed` but writes the audit row `privacy.shop_redact_skipped` (topic and purged count only) on the event's connection; treat that row as a mandatory erasure request that needs manual follow-up. The same row is written when the event's own connection survives the purge (an active reinstall owns the shop). When another org's disconnected row is the one purged, the `shop/redact` event itself lands in the active org's `webhook_events` (topic and ids only, no payload).
 - **Shared database role.** The API and the worker share the `app_user` role, which can execute `app_purge_store_connection` and `app_purge_shop`. Consider a separate worker role later.
 
 - **Nothing has run against real Shopify.** All behaviour is verified against `fake-shopify` and `signing` test helpers only.
 - **Expiring offline tokens (refresh deferred to 1b-3c).** Shopify can issue expiring offline access tokens plus a refresh token to new public apps (the `expiring=1` flow). 1b-2 stores only `{ accessToken }`, does not request expiring tokens and has no refresh. If Shopify issues an expiring token anyway, syncs will fail with an auth error after expiry until refresh exists.
-- **Webhook subscription GraphQL not verified.** The `webhookSubscriptionCreate` mutation (`URL!` variable type, `format: JSON`, topic enum names derived as `ORDERS_CREATE` and so on) was not independently verified against the live docs. Check it against a real shop in 1b-3.
+- **Webhook subscription GraphQL not verified.** The `webhookSubscriptionCreate` mutation (`URL!` variable type, `format: JSON`, topic enum names derived as `ORDERS_CREATE` and so on) was not independently verified against the live docs. Check it against a real shop (section 10).
 - **Callback edges.** A 401 from the API for a user whose web session still looks valid (for example an expired access token) bounces the user to the dashboard and loses the callback; the user restarts the connection. The web callback route sets `Referrer-Policy: no-referrer` on its redirects, because the query carries the code, state and signature.
 - No reconnect reminder emails.
 - The Redis queue, worker and sweep tests are skipped without Docker and are unverified until CI. The web page's pure helpers are unit-tested; the Playwright test only covers the guided empty page and error-text safety, not a real connect, and phone-width layout is unchecked.
-- API version is pinned in `SHOPIFY_API_VERSION` (`packages/connectors/src/shopify/config.ts`).
+- The default API version is the constant `SHOPIFY_API_VERSION` in `packages/connectors/src/shopify/config.ts`; the worker can override it with the env var of the same name.
 - Embedded Postgres test cleanup: `startTestDatabase()` in embedded mode stops the server and removes the directory on stop, process exit and SIGINT/SIGTERM. The orphan `io_worker` processes seen on Windows came from `taskkill /T` killing children while the postmaster was alive: it entered crash recovery and respawned auxiliary processes outside taskkill's snapshot. The helper now kills the postmaster alone first, waits for it, then kills its `postgres.exe` children by parent pid (created after the server's start, so a reused pid is never hit), with a data-directory sweep as a fallback; every external command has a 20 s timeout, and the cleanup test re-queries descendants after the stop. In embedded mode the helper now captures the postmaster's exact creation time after start and only kills a pid whose current creation time equals it (the pid-reuse guard on Windows); the kill order is postmaster first, then its children. Verified on Windows with repeated `@erq/db` runs, zero leftover processes. The POSIX paths (SIGQUIT, which makes the postmaster kill its own children) remain unverified until CI.
+
+## 9. Data import (1b-3b)
+
+The connector (`packages/connectors/src/shopify`) fetches one page per call through the Admin GraphQL API with paginated queries (no bulk operations yet). The sync engine writes the pages (see `docs/sync.md`). The connector never touches the database.
+
+### 9.1 What is imported and what is left out
+
+| Resource | Imported |
+|---|---|
+| Locations | Name, address (joined `address.formatted`), active flag. A fulfillment-service location maps to `3pl`, any other to `warehouse`. Inactive locations are included. |
+| Products | Title, vendor, product type, status (`ACTIVE`, `DRAFT`, `ARCHIVED`; any unknown status maps to `draft`), and per variant: SKU, barcode, price, compare-at price and the inventory item's unit cost. A unit cost pre-fills the `product_cost` component only when the SKU has none (never overwrites). A cost in another currency than the shop's is ignored. |
+| Inventory | Per inventory item and location: `on_hand`, `committed` and `reserved` (summed into reserved) and `incoming`. |
+| Orders | Money (discounts, tax, shipping, lines, refunds), lines, refunds with their lines and shipping refunds, cancelled and closed state. Point-of-sale orders (`sourceName` `pos`) get the channel `shopify_pos`; every other source (including unknown ones) is `shopify_online`. Test orders are imported and flagged `isTest`. |
+
+Deliberately left out: customers, UTM fields and the landing site. They are protected customer data, which needs Shopify's approval and is not requested, so `customerExternalId`, `utm*` and `landingSite` are always null. The connector never queries a customer field.
+
+Only `app/uninstalled` is subscribed as a webhook. The connector has `updated_at` incremental filters for products, inventory and orders, but nothing schedules incrementals yet (1b-3c).
+
+### 9.2 Scopes and order history
+
+Requested scopes: `read_products`, `read_inventory`, `read_locations`, `read_orders`, `read_all_orders`. The scopes stored on the connection are the ones Shopify granted (from the token response). Shopify serves only the last 60 days of orders without `read_all_orders`, so the first backfill reaches back 365 days when the granted scopes include it and 60 days otherwise (`ordersBackfillSince` in `packages/sync/src/history.ts`; the scope must match exactly). Products, inventory and locations are always imported in full. The Connections page shows the oldest imported order date ("Showing orders from ...") and, when `read_all_orders` was not granted, that older history is not available.
+
+### 9.3 Starting a sync
+
+- **First backfill:** starts automatically at the end of the OAuth callback (all four resources, in order). The callback waits at most 5 seconds for the first job to be queued. If that fails (no Redis, queue error, timeout) the connection is still saved and connected, `last_error` is set to "Could not start the first import. Use Sync now." and the merchant uses Sync now. Reconnecting a shop re-runs a full backfill (accepted: the sinks are idempotent).
+- **Sync now:** `POST /orgs/:orgId/connections/:id/sync`, owner or admin only. 404 `connection_not_found`; 409 `connection_not_active` unless the connection is `active` or `error` (disconnected, pending and demo are refused); 503 `sync_not_available` when there is no Redis queue or the first job cannot be queued. Returns `{ started: boolean }`; `started: false` while any resource of the connection is still running. It runs a full backfill when any resource has never completed, otherwise an incremental run. A start writes the audit action `connection.sync_requested`.
+- **Sync summary** on each item of `GET /orgs/:orgId/connections` (`sync`): `state` (`never`, `running`, `idle`, `failed`), `resource` (the first running or failed resource in the order locations, products, inventory, orders), `recordsProcessed`, `coveredFrom` (oldest imported order date), `historyLimited`, `error` (the failed resource's stored error), `canStart`. `never` also covers a partly finished first import.
+- **Web wording** (`describeSync` in `apps/web/src/lib/connections.ts`): a disconnected store reads "Not connected"; a running import shows the resource and the record count; a failed one reads "Import stopped" with the stored reason; a connection in `error` is never shown as up to date; a finished one reads "Last import finished <relative time>" and gets a warning when older than `STALE_AFTER_MS` (2 days). The reason for a disabled Sync now button is shown as text beside it.
+
+### 9.4 Query size and rate limits
+
+Shopify rejects a query whose requested cost exceeds 1000 points, so the page sizes are small constants in `packages/connectors/src/shopify/cursor.ts`:
+
+| Resource | Sizes |
+|---|---|
+| Locations | 100 per page |
+| Products | 8 products per page, 50 variants inline; more variants through follow-up pages |
+| Inventory | 10 items per page, 10 levels inline, 50 per follow-up page |
+| Orders | 3 orders per page, 10 lines inline (100 per follow-up page), 5 refunds inline, 5 refund lines and 2 refund shipping lines per refund inline. Follow-up queries `ErqOrderRefunds` (an order with more than 5 refunds), `ErqRefundLines` and `ErqRefundShipping` (100 per page). Hard cap: 20 refunds per order (more fails the page). |
+
+Extra pages for one parent are bounded by `MAX_EXTRA_PAGES` (20). The cost model in the code comments (1 point per object, 2 per variant with its inventory item, a money set counts 2) is an estimate: **verify it on the first install** with `extensions.cost.requestedQueryCost`. The page sizes may be raised once the real costs are known.
+
+Rate limiting: the engine charges a fixed `costPerPage` of 100 before each fetch against the policy `{ capacity 1000, refillPerSecond 50, costPerPage 100 }` (`packages/sync/src/policies.ts`); the limiter never sees the actual cost, so the numbers are an estimate and are unverified. On top of that the connector reacts to Shopify: an HTTP 429 or a GraphQL `THROTTLED` error becomes a `RateLimitedError` and the job is retried later without using an attempt. The wait is clamped to 500 to 60000 ms (HTTP 429 uses `Retry-After`; a throttle uses the reported cost and restore rate, default 2000 ms).
+
+### 9.5 Error mapping
+
+Any GraphQL `errors` entry fails the whole page, even when `data` is present (a tolerated field-level access error could silently null unit costs and corrupt profit numbers). Stored messages are fixed strings; the response body and the token are never included.
+
+| Situation | Error | Stored message |
+|---|---|---|
+| Invalid shop domain | permanent | Invalid shop domain |
+| Unusable stored credentials | auth | Stored credentials are unusable. Reconnect the store. |
+| HTTP 401 or 403 | auth | Shopify rejected the access token. |
+| HTTP 429 | rate limited | (retried later) |
+| HTTP 5xx | transient | Shopify is temporarily unavailable |
+| Network failure or timeout | transient | network error |
+| GraphQL error code `THROTTLED` | rate limited | (retried later) |
+| GraphQL error code `ACCESS_DENIED` | permanent | Shopify did not allow this request. Check the app's permissions. |
+| Any other non-200 status, unparseable body, unexpected shape, any other GraphQL error | permanent | Shopify returned an unexpected response. |
+| Unreadable amount or currency | permanent | Shopify returned an unreadable amount. / Shopify returned an unreadable currency. |
+| Mixed currencies in one order | permanent | Shopify returned mixed currencies for one order. |
+| Tampered or invalid cursor | permanent | Invalid sync cursor. |
+
+### 9.6 Money
+
+Shopify money is a decimal string. The connector converts it with exact string math (no floating point) to integer minor units using the currency's exponent: 0 for JPY, KRW and the other zero-decimal currencies, 3 for BHD, KWD and the other three-decimal ones, otherwise 2. Extra digits round half away from zero on the first dropped digit. An amount with more than 15 integer digits or above the safe integer range fails the page. The shop currency comes from `shop { currencyCode }` in each query; an order uses its own money-set currency. There is one currency per org and no FX conversion.
+
+### 9.7 Limitations of the import
+
+- **Tax-inclusive shops** (`taxesIncluded` true) double count tax: line prices already contain tax and tax is also reported separately, so net sales are overstated. Not handled (the US target market is tax-exclusive; non-US tax is out of scope for v1).
+- **Incremental filters can miss changes.** Incremental runs filter on `updated_at`, which misses cost-only changes (inventory item cost) and quantity-only changes. A periodic full sync is needed (1b-3c). Cost import never overwrites an existing cost anyway.
+- **Late-linked order lines:** an order line whose variant was unknown keeps a null cost snapshot until the order re-syncs (no link-up pass yet).
+- **Unknown values:** an unknown product status maps to `draft`; an unknown order source maps to `shopify_online`.
+- **Shipping versus discounts:** whether a free-shipping discount is subtracted twice (`totalDiscountsSet` and `totalShippingPriceSet`) is unverified.
+
+## 10. First-install checklist (everything below is unverified)
+
+Nothing in 1b-3b has run against a real Shopify shop. On the first install check each item and fix the code or this document:
+
+1. **GraphQL names and shapes per query:** `locations(includeInactive:)`, `isFulfillmentService`, `address.formatted`; `inventoryItems` with its `updated_at` filter; `quantities(names: ["on_hand","committed","reserved","incoming"])`; the `refunds` list on `Order` (a plain list, no cursor), `refundLineItems`, `refundShippingLines`, `restockType`; `sourceName` (`pos`), `test`, `taxesIncluded`, `totalShippingPriceSet` and `totalDiscountsSet`; the `node(id)` follow-up queries for refund lines and shipping lines.
+2. **API version** `2025-07`: still supported, and the queries valid on it.
+3. **Query costs:** read `extensions.cost.requestedQueryCost` and `actualQueryCost` for each query. Check the cost model behind the page sizes (section 9.4) and raise the page sizes if there is room. Check the 1000-point cap and the rate-limit policy `{1000, 50, 100}`; plans above standard have larger buckets.
+4. **Throttle signals:** the `THROTTLED` error code is not stated on Shopify's rate-limit page (only HTTP 429 is); confirm what a throttled request looks like.
+5. **`Money` is a decimal string** in every money field used.
+6. **OAuth redirect signature:** whether Shopify signs the encoded or the decoded query (section 4); drop the other form.
+7. **`unitCost`:** whether reading `inventoryItem.unitCost` needs `read_inventory` or `read_products`, and what a shop without that permission returns (any GraphQL error fails the page).
+8. **`read_all_orders`:** whether the app is granted it, and that the stored granted scopes drive the 365-day versus 60-day window.
+9. **Tax-inclusive shop and free-shipping discount** behavior (section 9.7).
+10. **Webhook subscription GraphQL** (`app/uninstalled`) and expiring offline tokens (section 8).
+11. **Reconnect** re-running a full backfill, and the 5-second wait for the first job in the callback.
+
+Connecting a development store end to end:
+
+1. Create an app in the Shopify Partner organisation and a development store.
+2. Set the allowed redirection URL to `${WEB_PUBLIC_URL}/connections/shopify/callback` (the web origin) and the compliance webhooks to `${API_PUBLIC_URL}/webhooks/shopify`.
+3. Set `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET`, `SHOPIFY_SCOPES` (or leave it empty for the default five), `API_PUBLIC_URL`, `WEB_PUBLIC_URL`, `REDIS_URL`, `ENCRYPTION_KEY_ID` and `ENCRYPTION_KEY` (`openssl rand -base64 32`) for the API, and `REDIS_URL` plus the same database and encryption settings for the worker. Optionally set `SHOPIFY_API_VERSION` for the worker.
+4. Run the API, the worker and the web app, sign in, open Connections and connect the shop. The first import starts after the redirect; watch the sync summary, then use Sync now for later runs.
+5. Work through the checklist above and record the real costs.

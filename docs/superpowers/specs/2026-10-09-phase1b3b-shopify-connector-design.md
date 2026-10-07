@@ -67,3 +67,14 @@ The connector encodes its cursor as base64url JSON `{ v: 1, after: string | null
 2. The contract suite passes for the Shopify connector; errors never leak tokens, bodies or queries.
 3. Connect starts the first backfill automatically; Sync now works for admins only; the Connections page shows progress, the covered history range and failures in plain English.
 4. All tests, typecheck, lint and builds pass; unverified items (real Shopify field names, cost numbers, API version) are listed in the docs.
+
+## 8. Refinements made during implementation
+
+Where the build differs from the text above (the code and `docs/shopify-connection.md` section 9 are authoritative):
+
+- Per-resource modules instead of one `queries.ts` and `normalize.ts`. The cursor carries only `after`; the shop currency comes from `shop { currencyCode }` in each query, and orders use their own money-set currency (mixed currencies fail the page).
+- Page sizes are small constants (products 8 and variants 50; inventory items 10; orders 3 with follow-up queries for lines, refunds, refund lines and refund shipping lines, at most 20 refunds per order) because Shopify rejects queries whose requested cost exceeds 1000 points. The cost model is an estimate to verify on the first install.
+- Any GraphQL `errors` entry fails the page, and the HTTP 429 and throttle waits are clamped to 500 to 60000 ms. Rate-limit policy: `{ capacity 1000, refillPerSecond 50, costPerPage 100 }`, charged as a fixed amount per page and unverified.
+- The engine, not the connector, records `last_synced_at` and recovers `error` to `active`, only at a real chain end and never for a resumed job. `failRun` never touches disconnected or demo connections. `enqueueSync` fails the run and frees the cursor when the queue throws.
+- Sync now answers 404 `connection_not_found`, 409 `connection_not_active` (anything but `active` or `error`) and 503 `sync_not_available`, and returns `started: false` while any resource is running. `coveredFrom` is the oldest imported order date and `historyLimited` comes from the stored scopes.
+- Tax-inclusive shops double count tax (documented limitation). Unknown product status maps to `draft`; unknown order source maps to online.

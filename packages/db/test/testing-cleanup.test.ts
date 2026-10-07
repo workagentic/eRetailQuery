@@ -2,7 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { afterAll, describe, expect, it } from 'vitest';
-import { cleanupLeakedDatabases, startTestDatabase } from '../src/testing';
+import { cleanupLeakedDatabases, sameProcessCreation, startTestDatabase } from '../src/testing';
 
 // These tests start their databases inside `it`, so they need the long timeout the other files give `beforeAll`.
 const LONG = { timeout: 180_000 };
@@ -132,5 +132,22 @@ describe('embedded test database cleanup', () => {
     if (kids !== undefined)
       expect(await waitNoDescendants(pid), 'orphans left after cleanup').toEqual([]);
     cleanupLeakedDatabases(); // idempotent
+  });
+});
+
+describe('sameProcessCreation', () => {
+  it('is true only for equal, defined creation times', () => {
+    expect(sameProcessCreation('20261008120000.123456+000', '20261008120000.123456+000')).toBe(
+      true,
+    );
+    expect(sameProcessCreation(' 20261008120000.123456+000 ', '20261008120000.123456+000')).toBe(
+      true,
+    );
+    expect(sameProcessCreation('20261008120000.123456+000', '20261008120001.000000+000')).toBe(
+      false,
+    );
+    expect(sameProcessCreation(undefined, '20261008120000.123456+000')).toBe(false);
+    expect(sameProcessCreation('20261008120000.123456+000', undefined)).toBe(false);
+    expect(sameProcessCreation(undefined, undefined)).toBe(false);
   });
 });

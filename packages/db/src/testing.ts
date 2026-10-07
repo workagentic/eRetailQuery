@@ -70,8 +70,11 @@ interface LiveServer {
   pid?: number;
   /** The library instance, set once start() was called on it. */
   pg?: EmbeddedHandle;
-  /** Epoch ms taken before initdb: every process of this server was created after it (pid-reuse guard). */
-  startedAt: number;
+  /**
+   * Exact creation time (UTC ticks, as text) of the postmaster, read right after start(). Windows only. A pid is
+   * only killed while its current creation time equals this; undefined means "unverifiable, never kill by pid".
+   */
+  createdAt?: string;
 }
 
 /** Data directory -> embedded servers this process started and has not stopped yet. */
@@ -95,6 +98,38 @@ function pidAlive(pid: number): boolean {
   }
 }
 
+/** True only when both creation times are defined and equal after trimming (the pid-reuse guard). */
+export function sameProcessCreation(
+  expected: string | undefined,
+  actual: string | undefined,
+): boolean {
+  if (expected === undefined || actual === undefined) return false;
+  return expected.trim() !== '' && expected.trim() === actual.trim();
+}
+
+/**
+ * Windows: the creation time (UTC ticks) of the postgres.exe with this pid, or undefined when it is not a running
+ * postgres.exe or cannot be read. POSIX: undefined (not verified there, see signalPosix).
+ */
+function processCreation(pid: number | undefined): string | undefined {
+  if (process.platform !== 'win32' || pid === undefined) return undefined;
+  try {
+    const out = execFileSync(
+      'powershell',
+      [
+        '-NoProfile',
+        '-NonInteractive',
+        '-Command',
+        `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${pid}"; if ($p -and $p.Name -eq 'postgres.exe' -and $p.CreationDate) { $p.CreationDate.ToUniversalTime().Ticks }`,
+      ],
+      { encoding: 'utf8', windowsHide: true, timeout: EXEC_TIMEOUT_MS },
+    ).trim();
+    return /^\d+$/.test(out) ? out : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function sleepSync(ms: number): void {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
@@ -115,25 +150,38 @@ function detach(server: LiveServer): void {
  * Windows: kills the postmaster FIRST AND ALONE, waits for it to exit, then kills its children by parent pid.
  * Killing a child first (what `taskkill /T` does) makes a live postmaster enter crash recovery and respawn
  * auxiliary processes (io_worker) that are not in taskkill's snapshot and survive as orphans. A dead postmaster
- * cannot respawn anything, and Windows keeps ParentProcessId on orphans. Every match must be postgres.exe created
- * after startedAt, so a reused pid is never killed. The data-directory command-line sweep is a fallback only (it
- * catches the postmaster, not its children, whose command line is `--forkchild=... <handle>`). One PowerShell call.
+ * cannot respawn anything, and Windows keeps ParentProcessId on orphans. The pid is used ONLY while the process
+ * with that pid is a postgres.exe whose creation time EQUALS the one captured after start() (sameProcessCreation,
+ * re-checked inside the script); children must also be postgres.exe created no earlier than the postmaster. If the
+ * creation time is unknown or differs (pid reused, or postmaster already gone) no pid is killed: a reused pid is
+ * the hazard. The data-directory command-line sweep is path-unique and always runs; it catches the postmaster, not
+ * its children, whose command line is `--forkchild=... <handle>`. At most two PowerShell calls.
  */
-function killWindowsSync(pid: number | undefined, dir: string, startedAt: number): void {
+function killWindowsSync(
+  pid: number | undefined,
+  dir: string,
+  createdAt: string | undefined,
+): void {
+  const verified =
+    pid !== undefined &&
+    createdAt !== undefined &&
+    sameProcessCreation(createdAt, processCreation(pid));
+  const pmPid = verified ? pid : 0;
+  const ticks = verified ? createdAt.trim() : '0';
   const quotedDir = `'${dir.replace(/'/g, "''")}'`;
   const script = [
     "$ErrorActionPreference = 'SilentlyContinue'",
     `$dir = ${quotedDir}.ToLowerInvariant()`,
-    `$since = [DateTimeOffset]::FromUnixTimeMilliseconds(${startedAt - 2000}).LocalDateTime`,
-    `$pm = ${pid ?? 0}`,
+    `$ticks = [long]${ticks}`,
+    `$pm = ${pmPid}`,
     'if ($pm -gt 0) {',
     '  $p = Get-CimInstance Win32_Process -Filter "ProcessId=$pm"',
-    "  if ($p -and $p.Name -eq 'postgres.exe' -and $p.CreationDate -ge $since) {",
+    "  if ($p -and $p.Name -eq 'postgres.exe' -and $p.CreationDate.ToUniversalTime().Ticks -eq $ticks) {",
     '    $h = Get-Process -Id $pm',
     '    if ($h) { $h.Kill(); [void]$h.WaitForExit(10000) }',
     '  }',
     '  Get-CimInstance Win32_Process -Filter "ParentProcessId=$pm" |',
-    "    Where-Object { $_.Name -eq 'postgres.exe' -and $_.CreationDate -ge $since } |",
+    "    Where-Object { $_.Name -eq 'postgres.exe' -and $_.CreationDate.ToUniversalTime().Ticks -ge $ticks } |",
     '    ForEach-Object { Stop-Process -Id $_.ProcessId -Force }',
     '}',
     `Get-CimInstance Win32_Process -Filter "Name='postgres.exe'" |`,
@@ -147,8 +195,8 @@ function killWindowsSync(pid: number | undefined, dir: string, startedAt: number
       timeout: EXEC_TIMEOUT_MS,
     });
   } catch {
-    // PowerShell missing or timed out: kill the postmaster alone (never /T, see above).
-    if (pid !== undefined) {
+    // PowerShell missing or timed out: kill the postmaster alone (never /T, see above), only if verified.
+    if (verified) {
       try {
         execFileSync('taskkill', ['/PID', String(pid), '/F'], {
           stdio: 'ignore',
@@ -183,7 +231,7 @@ function killServerSync(dir: string): void {
   live.delete(dir);
   const pid = server.pid ?? readPid(dir);
   if (process.platform === 'win32') {
-    killWindowsSync(pid, dir, server.startedAt);
+    killWindowsSync(pid, dir, server.createdAt);
     detach(server); // after the kill: its own `taskkill /t` must not race our ordered kill (see detach)
   } else {
     detach(server); // before the kill, so its exit listener sees the child die and clears its handle
@@ -236,7 +284,7 @@ async function startEmbedded(): Promise<TestDatabase> {
   // embedded-postgres is ESM-only; a dynamic import keeps this CJS build working.
   const { default: EmbeddedPostgres } = await import('embedded-postgres');
   installHooks();
-  const server: LiveServer = { startedAt: Date.now() };
+  const server: LiveServer = {};
   const dir = await mkdtemp(path.join(os.tmpdir(), 'erq-pg-'));
   live.set(dir, server);
   try {
@@ -254,6 +302,7 @@ async function startEmbedded(): Promise<TestDatabase> {
     server.pg = pg;
     await pg.start();
     server.pid = readPid(dir);
+    server.createdAt = processCreation(server.pid);
     await pg.createDatabase('erq');
     const ownerUrl = `postgres://erq_owner:owner@127.0.0.1:${port}/erq`;
     await runMigrations(ownerUrl, APP_USER_PASSWORD);

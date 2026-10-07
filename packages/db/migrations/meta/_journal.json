@@ -148,6 +148,13 @@
       "when": 1791373288985,
       "tag": "0020_glossy_sister_grimm",
       "breakpoints": true
+    },
+    {
+      "idx": 21,
+      "version": "7",
+      "when": 1791396607671,
+      "tag": "0021_shopify_privacy_sweep",
+      "breakpoints": true
     }
   ]
 }

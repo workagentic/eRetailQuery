@@ -148,6 +148,33 @@ describe('webhook_events', () => {
     ).toEqual(ids.sort());
     expect(await api.listStaleWebhookEvents(new Date(Date.now() - 10 * 60_000), 1)).toHaveLength(1);
   });
+  it('also lists failed privacy events (mandatory erasure) once their last attempt is older than the cutoff', async () => {
+    await owner.query(`delete from webhook_events`);
+    await owner.query(
+      `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload, status, updated_at) values
+        ($1, $1, 'shop/redact', 'p-shop', '{}', 'failed', now() - interval '30 minutes'),
+        ($1, $1, 'customers/redact', 'p-cust', '{}', 'failed', now() - interval '20 minutes'),
+        ($2, $2, 'customers/data_request', 'p-data', '{}', 'failed', now() - interval '15 minutes'),
+        ($1, $1, 'shop/redact', 'p-recent', '{}', 'failed', now()),
+        ($1, $1, 'orders/updated', 'n-fail', '{}', 'failed', now() - interval '3 hours'),
+        ($1, $1, 'app/uninstalled', 'n-uninst', '{}', 'failed', now() - interval '3 hours'),
+        ($1, $1, 'shop/redact', 'p-done', '{}', 'processed', now() - interval '3 hours')`,
+      [A, B],
+    );
+    const stale = await api.listStaleWebhookEvents(new Date(Date.now() - 10 * 60_000), 10);
+    const ids = (
+      await owner.query(
+        `select id, external_event_id e from webhook_events where external_event_id in ('p-shop','p-cust','p-data')`,
+      )
+    ).rows;
+    const byExt = new Map(ids.map((r) => [r.e as string, r.id as string]));
+    // Oldest last attempt first; a recent failure waits for the next window, other topics never.
+    expect(stale).toEqual([
+      { orgId: A, eventId: byExt.get('p-shop') },
+      { orgId: A, eventId: byExt.get('p-cust') },
+      { orgId: B, eventId: byExt.get('p-data') },
+    ]);
+  });
 });
 
 describe('definer function hygiene', () => {

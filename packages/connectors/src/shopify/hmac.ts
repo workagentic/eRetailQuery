@@ -52,6 +52,8 @@ export function verifyOAuthRawQuery(
   let hmac: string | undefined;
   const encoded: { key: string; pair: string }[] = [];
   const decoded: { key: string; pair: string }[] = [];
+  // The decoded message is only unambiguous when no decoded piece can be re-split into other pairs.
+  let decodedAllowed = true;
   let timestamp: string | undefined;
   for (const pair of query.split('&')) {
     const eq = pair.indexOf('=');
@@ -66,6 +68,7 @@ export function verifyOAuthRawQuery(
     }
     if (seen.has(key)) return false;
     seen.add(key);
+    if (key.includes('&') || key.includes('=') || value.includes('&')) decodedAllowed = false;
     if (key === 'hmac') {
       hmac = value;
       continue;
@@ -94,7 +97,9 @@ export function verifyOAuthRawQuery(
     apiSecret,
     given,
   );
-  if (!(matchEncoded || matchDecoded)) return false;
+  // Both comparisons always run. When the decoded form is ambiguous (a decoded `&` or a `=` in a key),
+  // `a=1&b=2` and `a=1%26b%3D2` would sign identically, so only the encoded candidate may match.
+  if (!(matchEncoded || (matchDecoded && decodedAllowed))) return false;
   const ts = Number(timestamp);
   if (timestamp === undefined || !Number.isSafeInteger(ts)) return false;
   const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);

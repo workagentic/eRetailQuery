@@ -33,6 +33,7 @@ export const gqlThrottled = (cost: CostOpts = {}): unknown => ({
 
 /** Cursor = index of the last returned item; `after` resumes after that index. */
 export function paginate<T>(items: T[], first: number, after: string | null) {
+  if (after !== null && !/^\d+$/.test(after)) throw new Error(`paginate: invalid cursor ${after}`);
   const start = after === null ? 0 : Number(after) + 1;
   const nodes = items.slice(start, start + first);
   const last = start + nodes.length - 1;
@@ -81,6 +82,10 @@ export class FakeShopifyAdmin implements HttpClient {
     if (!handler) return { status: 404, headers: {}, body: '{}' };
     const index = this.counts.get(name) ?? 0;
     this.counts.set(name, index + 1);
-    return { status: 200, headers: {}, body: JSON.stringify(handler(body.variables ?? {}, index)) };
+    const out = handler(body.variables ?? {}, index);
+    if (out === undefined) {
+      throw new Error(`FakeShopifyAdmin handler for ${name} returned undefined`);
+    }
+    return { status: 200, headers: {}, body: JSON.stringify(out) };
   }
 }

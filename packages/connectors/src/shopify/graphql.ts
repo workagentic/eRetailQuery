@@ -28,7 +28,8 @@ const envelope = z.object({
       z
         .object({
           message: z.string().optional(),
-          extensions: z.object({ code: z.string().optional() }).passthrough().optional(),
+          // Tolerant: null or non-object extensions just mean "no code".
+          extensions: z.unknown().optional(),
         })
         .passthrough(),
     )
@@ -95,7 +96,10 @@ export function createShopifyGraphqlClient(opts: { http: HttpClient; apiVersion?
         const raw = (res.headers['retry-after'] ?? '').trim();
         const seconds = raw === '' ? Number.NaN : Number(raw);
         throw new RateLimitedError(
-          Number.isFinite(seconds) && seconds >= 0 ? seconds * 1000 : 2000,
+          // Same window as the throttle path so a huge Retry-After cannot park a sync.
+          Number.isFinite(seconds) && seconds >= 0
+            ? Math.min(60_000, Math.max(500, seconds * 1000))
+            : 2000,
         );
       }
       if (res.status >= 500) throw new TransientError('Shopify is temporarily unavailable');
@@ -107,7 +111,14 @@ export function createShopifyGraphqlClient(opts: { http: HttpClient; apiVersion?
         throw new PermanentError(UNEXPECTED);
       }
       if (parsed.errors && parsed.errors.length > 0) {
-        const codes = parsed.errors.map((e) => e.extensions?.code);
+        // Any GraphQL errors entry fails the whole page, even when data is present: a tolerated
+        // field-level ACCESS_DENIED could silently null unit costs and corrupt profit numbers.
+        const codes = parsed.errors.map((e) => {
+          const ext = e.extensions;
+          return ext !== null && typeof ext === 'object'
+            ? (ext as { code?: unknown }).code
+            : undefined;
+        });
         if (codes.includes('THROTTLED'))
           throw new RateLimitedError(throttleWaitMs(parsed.extensions));
         if (codes.includes('ACCESS_DENIED')) {

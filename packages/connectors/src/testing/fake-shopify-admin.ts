@@ -26,6 +26,10 @@ const costExtension = (c: CostOpts) => ({
 export const productsQueryCost = (productsFirst: number, variantsFirst: number): number =>
   productsFirst * (1 + variantsFirst * 2);
 
+/** Requested cost of an inventory query: per item 2 (item + variant) plus 6 per level (level, location, 4 quantities). */
+export const inventoryQueryCost = (itemsFirst: number, levelsFirst: number): number =>
+  itemsFirst * (2 + levelsFirst * 6);
+
 export const gqlOk = (data: unknown, cost: CostOpts = {}): unknown => ({
   data,
   extensions: costExtension(cost),

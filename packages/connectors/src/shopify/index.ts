@@ -10,3 +10,4 @@ export * from './graphql';
 export * from './cursor';
 export * from './locations';
 export * from './products';
+export * from './inventory';

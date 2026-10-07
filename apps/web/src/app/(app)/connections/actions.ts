@@ -69,8 +69,9 @@ export async function syncNowAction(
 ): Promise<SyncNowState> {
   const id = formData.get('id');
   if (typeof id !== 'string' || id === '') return { error: SYNC_FAILED };
+  // Outside the try so a redirect for an unauthenticated user is not swallowed.
+  const { active } = await loadAppContext();
   try {
-    const { active } = await loadAppContext();
     const res = await apiFetch<SyncNowResponse>(
       `/orgs/${active.orgId}/connections/${encodeURIComponent(id)}/sync`,
       { method: 'POST', orgId: active.orgId },
@@ -79,6 +80,8 @@ export async function syncNowAction(
     return { started: res.started };
   } catch (e) {
     if (e instanceof ApiRequestError && (e.status === 409 || e.status === 503)) {
+      // The connection's state changed under the page; refresh it so the page shows the truth.
+      revalidatePath('/connections');
       return { error: e.message };
     }
     return { error: SYNC_FAILED };

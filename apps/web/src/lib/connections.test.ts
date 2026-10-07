@@ -4,6 +4,7 @@ import {
   connectionsErrorMessage,
   describeConnection,
   describeSync,
+  STALE_AFTER_MS,
   isShopifyAuthorizeUrl,
   shopifyErrorMessage,
   shopifyWarningMessage,
@@ -178,10 +179,11 @@ describe('isShopifyAuthorizeUrl', () => {
 
 describe('describeSync', () => {
   const FIVE_MIN_AGO = '2026-10-07T11:55:00Z';
+  const ACTIVE = { status: 'active', lastError: null } as const;
   const d = (
     s: Partial<ConnectionSyncDto>,
     last: string | null = null,
-    c?: Parameters<typeof describeSync>[3],
+    c: Parameters<typeof describeSync>[3] = ACTIVE,
   ) => describeSync(sync(s), last, NOW, c);
 
   it('says what is importing, with a thousands separator, and blocks a second start', () => {
@@ -216,6 +218,9 @@ describe('describeSync', () => {
       tone: 'warn',
       canSync: true,
     });
+    expect(d({ state: 'failed', resource: 'orders', error: 'No full stop' }).detail).toBe(
+      'Stopped while importing orders. No full stop.',
+    );
     expect(d({ state: 'failed', resource: 'products', error: null }).detail).toBe(
       'Stopped while importing products. Try Sync now.',
     );
@@ -228,17 +233,42 @@ describe('describeSync', () => {
     expect(d({ state: 'failed', canStart: false }).canSync).toBe(false);
   });
 
-  it('shows up to date with the last synced time', () => {
+  it('shows when the last import finished instead of claiming to be up to date', () => {
     expect(d({ state: 'idle' }, FIVE_MIN_AGO)).toEqual({
-      headline: 'Up to date',
-      detail: 'Last synced 5 minutes ago',
+      headline: 'Last import finished 5 minutes ago',
+      detail: null,
       tone: 'ok',
       canSync: true,
     });
     expect(d({ state: 'idle', canStart: false }, FIVE_MIN_AGO).canSync).toBe(false);
   });
 
-  it('says never imported, and why Sync now is unavailable', () => {
+  it('warns when the last import is more than two days old, and not at exactly two days', () => {
+    expect(STALE_AFTER_MS).toBe(2 * 24 * 60 * 60 * 1000);
+    const exactly = new Date(NOW.getTime() - STALE_AFTER_MS).toISOString();
+    const justOver = new Date(NOW.getTime() - STALE_AFTER_MS - 1000).toISOString();
+    expect(d({ state: 'idle' }, exactly)).toMatchObject({
+      headline: 'Last import finished 2 days ago',
+      detail: null,
+      tone: 'ok',
+    });
+    expect(d({ state: 'idle' }, justOver)).toEqual({
+      headline: 'Last import finished 2 days ago',
+      detail: 'This may be out of date. Try Sync now.',
+      tone: 'warn',
+      canSync: true,
+    });
+  });
+
+  it('treats an idle connection that never recorded a sync as not imported', () => {
+    expect(d({ state: 'idle' }, null)).toMatchObject({
+      headline: 'Not imported yet',
+      detail: 'Press Sync now to start.',
+    });
+    expect(d({ state: 'idle' }, 'not a date').headline).toBe('Not imported yet');
+  });
+
+  it('says never imported, and why Sync now is unavailable for every status', () => {
     expect(d({ state: 'never', canStart: true })).toEqual({
       headline: 'Not imported yet',
       detail: 'Press Sync now to start.',
@@ -251,17 +281,26 @@ describe('describeSync', () => {
       tone: 'muted',
       canSync: false,
     });
+    const pending = d({ state: 'never', canStart: true }, null, {
+      status: 'pending',
+      lastError: null,
+    });
+    expect(pending.detail).toBe('Waiting for the connection to finish setting up.');
+    expect(pending.canSync).toBe(false);
+    const demo = d({ state: 'never', canStart: true }, null, { status: 'demo', lastError: null });
+    expect(demo.detail).toBe('This is sample data, so there is nothing to import.');
+    expect(demo.canSync).toBe(false);
   });
 
   it('tells the owner how far back the orders go and why not further', () => {
     expect(d({ state: 'idle', coveredFrom: '2026-10-09T03:00:00Z' }, FIVE_MIN_AGO).detail).toBe(
-      'Last synced 5 minutes ago Showing orders from Oct 9, 2026.',
+      'Showing orders from Oct 9, 2026.',
     );
     expect(
       d({ state: 'idle', coveredFrom: '2026-08-01T00:00:00Z', historyLimited: true }, FIVE_MIN_AGO)
         .detail,
     ).toBe(
-      "Last synced 5 minutes ago Showing orders from Aug 1, 2026. Older history needs Shopify's approval to read all orders.",
+      "Showing orders from Aug 1, 2026. Older history needs Shopify's approval to read all orders.",
     );
     expect(
       d({ state: 'running', resource: 'orders', coveredFrom: '2026-08-01T00:00:00Z' }).detail,
@@ -269,9 +308,7 @@ describe('describeSync', () => {
   });
 
   it('ignores a coveredFrom that is not a date', () => {
-    expect(d({ state: 'idle', coveredFrom: 'garbage' }, FIVE_MIN_AGO).detail).toBe(
-      'Last synced 5 minutes ago',
-    );
+    expect(d({ state: 'idle', coveredFrom: 'garbage' }, FIVE_MIN_AGO).detail).toBeNull();
   });
 
   it('does not call a connection in error up to date, even when the import looks idle', () => {
@@ -279,19 +316,17 @@ describe('describeSync', () => {
       d({ state: 'idle' }, FIVE_MIN_AGO, { status: 'error', lastError: 'Bad token.' }),
     ).toEqual({
       headline: 'Not up to date',
-      detail: 'Bad token. Last synced 5 minutes ago',
+      detail: 'Bad token. Last synced 5 minutes ago.',
       tone: 'warn',
       canSync: true,
     });
-    expect(d({ state: 'idle' }, null, { status: 'error', lastError: null }).detail).toBe(
-      'Something went wrong with this connection. Last synced never',
-    );
-    expect(d({ state: 'never' }, null, { status: 'error', lastError: 'Bad token.' })).toMatchObject(
-      {
-        headline: 'Not imported yet',
-        detail: 'Bad token. Last synced never',
-        tone: 'warn',
-      },
+    expect(d({ state: 'never' }, null, { status: 'error', lastError: 'Bad token' })).toMatchObject({
+      headline: 'Not imported yet',
+      detail: 'Bad token. Not synced yet.',
+      tone: 'warn',
+    });
+    expect(d({ state: 'idle' }, FIVE_MIN_AGO, { status: 'error', lastError: null }).detail).toBe(
+      'Something went wrong with this connection. Last synced 5 minutes ago.',
     );
   });
 
@@ -310,6 +345,11 @@ describe('describeSync', () => {
     }
     expect(
       d({ state: 'idle' }, FIVE_MIN_AGO, { status: 'disconnected', lastError: null }),
-    ).toMatchObject({ headline: 'Not connected', tone: 'muted', canSync: false });
+    ).toMatchObject({
+      headline: 'Not connected',
+      detail: 'Reconnect this store to import your data.',
+      tone: 'muted',
+      canSync: false,
+    });
   });
 });

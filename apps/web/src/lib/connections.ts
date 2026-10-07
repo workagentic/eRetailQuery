@@ -136,10 +136,25 @@ function coverageText(sync: ConnectionSyncDto): string | null {
   return parts.length > 0 ? parts.join(' ') : null;
 }
 
+/** An import older than this is shown as a warning, not as fresh. */
+export const STALE_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
+
+const sentence = (text: string): string =>
+  /[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`;
+
 const join = (...parts: (string | null)[]): string | null => {
-  const kept = parts.filter((p): p is string => p !== null && p !== '');
-  return kept.length > 0 ? kept.join(' ') : null;
+  const kept = parts.filter((p): p is string => p !== null && p.trim() !== '');
+  return kept.length > 0 ? kept.map(sentence).join(' ') : null;
 };
+
+function neverDetail(canSync: boolean, status: ConnectionDto['status'], canStart: boolean): string {
+  if (canSync) return 'Press Sync now to start.';
+  if (status === 'pending') return 'Waiting for the connection to finish setting up.';
+  if (status === 'demo') return 'This is sample data, so there is nothing to import.';
+  return canStart
+    ? 'Importing is not available for this connection.'
+    : 'Importing is not available on this server yet.';
+}
 
 /**
  * Plain-English sync status for one connection. It combines the import state with the
@@ -149,18 +164,19 @@ export function describeSync(
   sync: ConnectionSyncDto,
   lastSyncedAt: string | null,
   now: Date,
-  connection?: Pick<ConnectionDto, 'status' | 'lastError'>,
+  connection: Pick<ConnectionDto, 'status' | 'lastError'>,
 ): SyncView {
   const coverage = coverageText(sync);
-  const usable =
-    connection === undefined || connection.status === 'active' || connection.status === 'error';
+  const usable = connection.status === 'active' || connection.status === 'error';
   const canSync = sync.canStart && usable;
-  const synced = `Last synced ${relativeTime(lastSyncedAt, now)}`;
+  const syncedMs = lastSyncedAt ? new Date(lastSyncedAt).getTime() : Number.NaN;
+  const hasSynced = !Number.isNaN(syncedMs);
+  const synced = hasSynced ? `Last synced ${relativeTime(lastSyncedAt, now)}` : 'Not synced yet';
 
-  if (connection?.status === 'disconnected') {
+  if (connection.status === 'disconnected') {
     return {
       headline: 'Not connected',
-      detail: join('Reconnect this store to import your data.', coverage),
+      detail: join('Reconnect this store to import your data', coverage),
       tone: 'muted',
       canSync: false,
     };
@@ -174,38 +190,44 @@ export function describeSync(
     };
   }
   if (sync.state === 'failed') {
-    const where = `Stopped while importing ${resourceLabel(sync.resource)}.`;
-    const lastGood = lastSyncedAt
-      ? `Last successful sync ${relativeTime(lastSyncedAt, now)}.`
-      : null;
+    const lastGood = hasSynced ? `Last successful sync ${relativeTime(lastSyncedAt, now)}` : null;
     return {
       headline: 'Import stopped',
-      detail: join(where, sync.error ?? 'Try Sync now.', lastGood, coverage),
+      detail: join(
+        `Stopped while importing ${resourceLabel(sync.resource)}`,
+        sync.error ?? 'Try Sync now',
+        lastGood,
+        coverage,
+      ),
       tone: 'warn',
       canSync,
     };
   }
-  const inError = connection?.status === 'error';
-  if (inError) {
-    const why = `${connection.lastError ?? 'Something went wrong with this connection.'} ${synced}`;
+  const neverImported = sync.state === 'never' || !hasSynced;
+  if (connection.status === 'error') {
+    const why = connection.lastError ?? 'Something went wrong with this connection';
     return {
-      headline: sync.state === 'never' ? 'Not imported yet' : 'Not up to date',
-      detail: join(why, coverage),
+      headline: neverImported ? 'Not imported yet' : 'Not up to date',
+      detail: join(why, synced, coverage),
       tone: 'warn',
       canSync,
     };
   }
-  if (sync.state === 'never') {
+  if (neverImported) {
     return {
       headline: 'Not imported yet',
-      detail: sync.canStart
-        ? 'Press Sync now to start.'
-        : 'Importing is not available on this server yet.',
+      detail: neverDetail(canSync, connection.status, sync.canStart),
       tone: 'muted',
       canSync,
     };
   }
-  return { headline: 'Up to date', detail: join(synced, coverage), tone: 'ok', canSync };
+  const stale = now.getTime() - syncedMs > STALE_AFTER_MS;
+  return {
+    headline: `Last import finished ${relativeTime(lastSyncedAt, now)}`,
+    detail: join(stale ? 'This may be out of date. Try Sync now' : null, coverage),
+    tone: stale ? 'warn' : 'ok',
+    canSync,
+  };
 }
 
 // Mirror of SHOP_RE in packages/connectors/src/shopify/domain.ts (one DNS label); keep them identical.

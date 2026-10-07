@@ -27,7 +27,7 @@ const PRODUCTS_DOCUMENT = `query ErqProducts($first: Int!, $after: String, $quer
   products(first: $first, after: $after, query: $query) {
     nodes {
       id title vendor productType status updatedAt
-      variants(first: 100) {
+      variants(first: ${VARIANTS_PAGE_SIZE}) {
         nodes { ${VARIANT_FIELDS} }
         pageInfo { hasNextPage endCursor }
       }
@@ -89,6 +89,7 @@ export const PRODUCT_VARIANTS_OP = {
   schema: variantsResponse,
 } satisfies GraphqlOperation<z.infer<typeof variantsResponse>>;
 
+// Statuses added in newer API versions (e.g. UNLISTED) fall back to 'draft', never 'active'.
 const STATUS: Record<string, ProductStatus> = {
   ACTIVE: 'active',
   DRAFT: 'draft',
@@ -138,8 +139,7 @@ export function normalizeProduct(
   variantNodes: ShopifyVariantNode[],
   shopCurrency: string,
 ): NormalizedProduct {
-  const status = STATUS[node.status];
-  if (status === undefined) throw new PermanentError(UNEXPECTED);
+  const status = STATUS[node.status] ?? 'draft';
   return {
     externalId: node.id,
     title: node.title,
@@ -161,7 +161,9 @@ export async function fetchProducts(
   const { data, cost: firstCost } = await gql.query(ctx, PRODUCTS_OP, {
     first: PRODUCTS_PAGE_SIZE,
     after,
-    // Backfill imports every product; only incrementals filter.
+    // Backfill imports every product; only incrementals filter. Note: editing only an inventory
+    // item's cost does not bump the product's updated_at, so such changes are missed here and need
+    // a backfill or periodic full sync (to be handled in 1b-3c).
     query: options.updatedSince ? `updated_at:>='${options.updatedSince.toISOString()}'` : null,
   });
   let cost = firstCost;

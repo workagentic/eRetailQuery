@@ -6,9 +6,17 @@ import { z } from 'zod';
 import { PermanentError } from '../errors';
 
 export const LOCATIONS_PAGE_SIZE = 100;
-export const PRODUCTS_PAGE_SIZE = 25;
-export const VARIANTS_PAGE_SIZE = 100;
-/** Extra variant pages fetched for one product before the import fails loudly. */
+// Cost cap: Shopify rejects a query whose requested cost exceeds 1000 points, and any GraphQL error
+// fails the page. A connection costs about 1 point per object plus 2 per nested object here
+// (variant + inventoryItem/unitCost), so products * (1 + variants * 2) must stay under 1000:
+// 8 * (1 + 50 * 2) = 808. Raising either size can break every real import; a test guards this.
+// https://shopify.dev/docs/api/usage/limits#cost-calculation
+export const PRODUCTS_PAGE_SIZE = 8;
+export const VARIANTS_PAGE_SIZE = 50;
+/**
+ * Extra variant pages fetched for one product before the import fails loudly. Per-job ceiling:
+ * one products page can issue up to PRODUCTS_PAGE_SIZE * MAX_EXTRA_PAGES extra variant queries.
+ */
 export const MAX_EXTRA_PAGES = 20;
 
 const UNEXPECTED = 'Shopify returned an unexpected response.';

@@ -1,6 +1,15 @@
 import { describe, expect, it } from 'vitest';
-import { createShopifyGraphqlClient, decodeCursor, fetchProducts, PermanentError } from '../src';
-import { FakeShopifyAdmin, gqlOk, paginate } from '../src/testing';
+import {
+  createShopifyGraphqlClient,
+  decodeCursor,
+  encodeCursor,
+  fetchProducts,
+  PermanentError,
+  PRODUCTS_OP,
+  PRODUCTS_PAGE_SIZE,
+  VARIANTS_PAGE_SIZE,
+} from '../src';
+import { FakeShopifyAdmin, gqlOk, paginate, productsQueryCost } from '../src/testing';
 
 const ctx = { externalAccountId: 'a.myshopify.com', credentials: { accessToken: 'shpat_x' } };
 const variant = (n: number, over: Record<string, unknown> = {}) => ({
@@ -26,10 +35,13 @@ const product = (n: number, variants: unknown[], over: Record<string, unknown> =
 const productsHandler =
   (items: unknown[], currency = 'USD') =>
   (v: Record<string, unknown>) =>
-    gqlOk({
-      shop: { currencyCode: currency },
-      products: paginate(items, v.first as number, (v.after as string | null) ?? null),
-    });
+    gqlOk(
+      {
+        shop: { currencyCode: currency },
+        products: paginate(items, v.first as number, (v.after as string | null) ?? null),
+      },
+      { requested: productsQueryCost(v.first as number, VARIANTS_PAGE_SIZE) },
+    );
 const gqlOf = (admin: FakeShopifyAdmin) => createShopifyGraphqlClient({ http: admin });
 
 describe('products', () => {
@@ -140,22 +152,18 @@ describe('products', () => {
       ],
     );
   });
-  it('pages 25 products at a time and decodes/encodes cursors', async () => {
+  it('pages 8 products at a time and decodes/encodes cursors', async () => {
     const items = Array.from({ length: 30 }, (_, i) => product(i + 1, [variant(i + 1)]));
     const admin = new FakeShopifyAdmin().on('ErqProducts', productsHandler(items));
     const first = await fetchProducts(gqlOf(admin), ctx, null, {});
-    expect(first.items).toHaveLength(25);
+    expect(first.items).toHaveLength(8);
     expect(first.nextCursor).not.toBeNull();
-    expect(decodeCursor(first.nextCursor)).toBe('24');
+    expect(decodeCursor(first.nextCursor)).toBe('7');
     const second = await fetchProducts(gqlOf(admin), ctx, first.nextCursor, {});
-    expect(second.items.map((p) => p.title)).toEqual([
-      'Product 26',
-      'Product 27',
-      'Product 28',
-      'Product 29',
-      'Product 30',
-    ]);
-    expect(second.nextCursor).toBeNull();
+    expect(second.items.map((p) => p.title)).toEqual(
+      Array.from({ length: 8 }, (_, i) => `Product ${i + 9}`),
+    );
+    expect(second.nextCursor).not.toBeNull();
   });
   it('sends the updated_at filter only for incrementals', async () => {
     const admin = new FakeShopifyAdmin().on('ErqProducts', productsHandler([]));
@@ -169,7 +177,7 @@ describe('products', () => {
   });
   it('fetches the remaining variants of a product with more than 100 variants', async () => {
     const all = Array.from({ length: 250 }, (_, i) => variant(i + 1));
-    const first = paginate(all, 100, null);
+    const first = paginate(all, 50, null);
     const items = [product(1, first.nodes, {})];
     (items[0] as { variants: unknown }).variants = first;
     const admin = new FakeShopifyAdmin()
@@ -184,12 +192,13 @@ describe('products', () => {
     const page = await fetchProducts(gqlOf(admin), ctx, null, {});
     expect(page.items[0]!.variants).toHaveLength(250);
     expect(new Set(page.items[0]!.variants.map((x) => x.externalId)).size).toBe(250);
-    expect(admin.callsOf('ErqProductVariants')).toBe(2);
-    expect(page.cost).toBe(40 * 3);
+    // 250 variants: 50 inline, then 4 extra pages of 50.
+    expect(admin.callsOf('ErqProductVariants')).toBe(4);
+    expect(page.cost).toBe(40 * 5);
   });
   it('fails loudly instead of truncating when a product has an absurd number of variants', async () => {
-    const all = Array.from({ length: 2300 }, (_, i) => variant(i + 1));
-    const first = paginate(all, 100, null);
+    const all = Array.from({ length: 1200 }, (_, i) => variant(i + 1));
+    const first = paginate(all, 50, null);
     const items = [{ ...product(1, []), variants: first }];
     const admin = new FakeShopifyAdmin()
       .on('ErqProducts', productsHandler(items))
@@ -204,15 +213,58 @@ describe('products', () => {
     expect(err).toBeInstanceOf(PermanentError);
     expect(err.message).toBe('A product has too many variants to import.');
   });
-  it('rejects an unknown product status and an unreadable price', async () => {
-    for (const bad of [
-      product(1, [variant(1)], { status: 'WEIRD' }),
-      product(1, [variant(1, { price: 'abc' })]),
-    ]) {
-      const admin = new FakeShopifyAdmin().on('ErqProducts', productsHandler([bad]));
-      await expect(fetchProducts(gqlOf(admin), ctx, null, {})).rejects.toBeInstanceOf(
-        PermanentError,
+  it('rejects an unreadable price', async () => {
+    const admin = new FakeShopifyAdmin().on(
+      'ErqProducts',
+      productsHandler([product(1, [variant(1, { price: 'abc' })])]),
+    );
+    await expect(fetchProducts(gqlOf(admin), ctx, null, {})).rejects.toBeInstanceOf(PermanentError);
+  });
+  it('maps an unrecognised product status to draft, never active', async () => {
+    const admin = new FakeShopifyAdmin().on(
+      'ErqProducts',
+      productsHandler([product(1, [variant(1)], { status: 'UNLISTED' })]),
+    );
+    const page = await fetchProducts(gqlOf(admin), ctx, null, {});
+    expect(page.items[0]!.status).toBe('draft');
+  });
+  it('keeps the products query under the 1000 point cost cap with the real constants', async () => {
+    expect(PRODUCTS_OP.document).toContain(`variants(first: ${VARIANTS_PAGE_SIZE})`);
+    const admin = new FakeShopifyAdmin().on('ErqProducts', (v) => {
+      const requested = productsQueryCost(v.first as number, VARIANTS_PAGE_SIZE);
+      expect(requested).toBeLessThan(1000);
+      return gqlOk(
+        { shop: { currencyCode: 'USD' }, products: paginate([], v.first as number, null) },
+        { requested },
       );
-    }
+    });
+    await fetchProducts(gqlOf(admin), ctx, null, {});
+    expect(JSON.parse(admin.requests[0]!.body!).variables.first).toBe(PRODUCTS_PAGE_SIZE);
+    expect(productsQueryCost(PRODUCTS_PAGE_SIZE, VARIANTS_PAGE_SIZE)).toBeLessThan(1000);
+  });
+  it('fails instead of looping when nested variants say hasNextPage without a cursor', async () => {
+    const stuck = {
+      ...product(1, [variant(1)]),
+      variants: { nodes: [variant(1)], pageInfo: { hasNextPage: true, endCursor: null } },
+    };
+    const admin = new FakeShopifyAdmin().on('ErqProducts', productsHandler([stuck]));
+    await expect(fetchProducts(gqlOf(admin), ctx, null, {})).rejects.toBeInstanceOf(PermanentError);
+    expect(admin.callsOf('ErqProductVariants')).toBe(0);
+  });
+  it('fails when the product disappears while its variants are fetched', async () => {
+    const first = { nodes: [variant(1)], pageInfo: { hasNextPage: true, endCursor: '0' } };
+    const items = [{ ...product(1, []), variants: first }];
+    const admin = new FakeShopifyAdmin()
+      .on('ErqProducts', productsHandler(items))
+      .on('ErqProductVariants', () => gqlOk({ product: null }));
+    await expect(fetchProducts(gqlOf(admin), ctx, null, {})).rejects.toBeInstanceOf(PermanentError);
+  });
+  it('rejects a tampered cursor before calling Shopify', async () => {
+    const admin = new FakeShopifyAdmin().on('ErqProducts', productsHandler([]));
+    const err = await fetchProducts(gqlOf(admin), ctx, 'abc', {}).catch((e) => e);
+    expect(err).toBeInstanceOf(PermanentError);
+    expect(err.message).toBe('Invalid sync cursor.');
+    expect(admin.requests).toHaveLength(0);
+    expect(encodeCursor('x')).toBeTruthy();
   });
 });

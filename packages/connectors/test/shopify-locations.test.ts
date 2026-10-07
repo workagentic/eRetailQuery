@@ -65,7 +65,7 @@ describe('locations', () => {
       },
     ]);
   });
-  it('pages with opaque cursors and ends with a null cursor', async () => {
+  it('fetches one page of 100 and ends with a null cursor', async () => {
     const admin = adminFor();
     const gql = createShopifyGraphqlClient({ http: admin });
     const first = await fetchLocations(gql, ctx, null);
@@ -74,6 +74,14 @@ describe('locations', () => {
     expect(first.cost).toBe(40);
     const vars = JSON.parse(admin.requests[0]!.body!).variables;
     expect(vars).toEqual({ first: 100, after: null });
+  });
+  it('rejects a tampered cursor before calling Shopify', async () => {
+    const admin = adminFor();
+    const err = await fetchLocations(createShopifyGraphqlClient({ http: admin }), ctx, 'abc').catch(
+      (e) => e,
+    );
+    expect(err.message).toBe('Invalid sync cursor.');
+    expect(admin.requests).toHaveLength(0);
   });
   it('sends the decoded cursor back to Shopify when continuing', async () => {
     const admin = new FakeShopifyAdmin().on('ErqLocations', () =>

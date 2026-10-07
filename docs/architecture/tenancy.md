@@ -36,7 +36,7 @@ Phase 1b-2 adds four more (migrations 0014 to 0016), and 1b-3a adds `app_purge_s
 
 - `app_consume_oauth_state(nonce_hash)`: single-use consume of an OAuth state. Caller: the authenticated OAuth callback endpoint only (`POST /connections/shopify/callback`); no public callback route remains.
 - `app_find_store_connection(platform, external_account_id)`: returns org id, connection id and status. Callers: the authenticated OAuth callback endpoint and the Shopify webhook receiver only.
-- `app_list_stale_webhook_events(older_than, limit)`: cross-tenant read of ids of stale `received` and `processing` webhook events. Caller: the worker sweep only.
+- `app_list_stale_webhook_events(older_than, limit)`: cross-tenant read of ids of stale `received` and `processing` webhook events, and (migration 0021) of `failed` privacy-topic events (`customers/data_request`, `customers/redact`, `shop/redact`). Caller: the worker sweep only.
 - `app_purge_store_connection(org_id, connection_id)`: deletes one connection's data including ledger rows. Caller: `app_purge_shop` only.
 - `app_purge_shop(platform, external_account_id)`: purges every `disconnected` or `error` connection of that platform and shop across all orgs (rows locked `FOR UPDATE`, one audit row per org), by calling `app_purge_store_connection` for each. Never touches `active`, `pending` or `demo` connections. Caller: the worker's `shop/redact` handler only. `app_purge_store_connection` filters `oauth_states` by platform as well as shop.
 

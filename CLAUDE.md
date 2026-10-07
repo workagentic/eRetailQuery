@@ -2,7 +2,7 @@
 
 Domain: eretailquery.com
 Owner: Abdullah Shekha
-Status: Phase 0 (Foundations) built and reviewed on branch `phase0-foundations`; see section 16. Next is Phase 1, split into 1a metrics, 1b Shopify + CSV, 1c Meta/Google, 1d dashboard/P&L/Stripe. Build in the phases defined in section 12. Do not skip ahead.
+Status: Phase 0, 1a, 1b-1, 1b-2, 1b-3a and 1b-3b built; see section 16. Next is 1b-3c (live updates), then 1c Meta/Google and 1d dashboard/P&L/Stripe. Build in the phases defined in section 12. Do not skip ahead.
 
 ---
 
@@ -483,10 +483,10 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 **Known open items (details in docs/shopify-connection.md section 8):**
 - The OAuth redirect signature is accepted in both the encoded and the decoded signed form; verify on the first real install and drop one.
-- Webhook events that end `failed` after 5 BullMQ attempts are never swept (privacy topics included): sweep or alert soon, since 1b-3b now imports order data (1b-3c).
+- Failed webhook events: since migration 0021 the sweep re-lists `failed` privacy events (`customers/data_request`, `customers/redact`, `shop/redact`) once their last attempt is older than 10 minutes, so a mandatory erasure is retried until it succeeds (tested on Postgres; the BullMQ path is unverified). Not covered: nothing alerts on a privacy event that keeps failing, and failed events of other topics (`app/uninstalled`, data topics) are still never retried or alerted on (1b-3c).
 - The API and worker share `app_user`, which can execute `app_purge_store_connection` and `app_purge_shop`; consider a separate worker role.
 - Shopify token refresh (expiring offline tokens) is deferred to 1b-3c. The webhook subscription GraphQL details are unverified against real Shopify.
-- Phase 1b-3c (details in docs/sync.md, Known gaps): scheduler and incremental polling (incremental `updated_at` filters miss cost-only and quantity-only changes, so a periodic full sync is needed), webhook nudges, an order-line link-up pass, per-resource sync timestamps, and a test for the connection-health row lock. Tax-inclusive shops double count tax (documented limitation).
+- Phase 1b-3c (details in docs/sync.md, Known gaps): scheduler and incremental polling (the products `updated_at` filter misses cost-only changes, so a periodic full sync is needed; inventory already takes a full pass on every run because its filter missed quantity-only changes), webhook nudges, an order-line link-up pass, per-resource sync timestamps, and a test for the connection-health row lock. Tax-inclusive shops double count tax (documented limitation).
 - Edge: a 401 from the API for a user whose web session still looks valid bounces to the dashboard and loses the OAuth callback (the user restarts the connection).
 - Embedded Postgres test cleanup: the orphan `io_worker` leak was caused by `taskkill /T` killing children while the postmaster lived (crash recovery respawned them); fixed by killing the postmaster alone first, then its children by parent pid. Verified on Windows (three full `@erq/db` runs and three single-file runs with zero leftover processes); the helper now also guards pid kills by the postmaster's exact creation time. POSIX paths remain unverified until CI. Other packages load `@erq/db/testing` from `dist`: run `pnpm turbo run build --filter=@erq/db` before running their tests directly.
 
@@ -539,3 +539,6 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - 2026-10-09: The first backfill starts automatically after connect, and owners and admins also get Sync now.
 - 2026-10-09: `read_all_orders` is requested. The orders backfill reaches back 12 months when it was granted and 60 days otherwise, and the Connections page says so.
 - 2026-10-09: The sync engine now records `last_synced_at` and recovers errored connections at the end of a chain, and `failRun` no longer touches disconnected or demo connections.
+- 2026-10-09: A Shopify GraphQL `THROTTLED` response is waited out in place and the same query is retried (at most 5 times and 60 s of waiting per query) before the page is handed back to the queue, because re-running a page with many follow-up queries from its first query against an empty bucket could livelock.
+- 2026-10-09: Shopify inventory always takes a full pass, incrementals included, until 1b-3c: the inventory item's `updated_at` does not move on quantity-only changes, so the filter left stock stale after Sync now. Inventory has no history window and the sink is idempotent.
+- 2026-10-09: Failed privacy webhook events (`customers/data_request`, `customers/redact`, `shop/redact`) are retried by the sweep (migration 0021 extends `app_list_stale_webhook_events`) instead of staying terminal, because 1b-3b stores order data and an unerased `shop/redact` is a compliance risk. Chosen over re-labelling failed events as `received` so that `failed` stays truthful and a retry waits 10 minutes after the last attempt instead of racing BullMQ's own retries.

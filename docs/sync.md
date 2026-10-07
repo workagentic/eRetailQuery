@@ -49,7 +49,7 @@ fetchPage<R extends SyncResource>(ctx: ConnectionContext, resource: R, cursor: s
 ```
 
 - `resource` is one of `locations`, `products`, `inventory`, `orders`. `cursor` is opaque to the engine; null means the first page. Return `{ items, nextCursor, cost? }`; `nextCursor: null` means the last page. Pages must be finite and the cursor must advance.
-- `options.since` is set for backfills (only data from that date on). `options.updatedSince` is set for incremental runs (only data changed since). It is the previous run's start time.
+- `options.since` is set for backfills (only data from that date on). `options.updatedSince` is set for incremental runs (only data changed since). It is the previous run's start time. A connector may ignore `updatedSince` for a resource whose change filter is unreliable and return a full pass (the Shopify connector does for inventory, see below).
 - `ctx.credentials` is the decrypted credentials object. Never log it.
 - Connectors never touch the database and no platform field may leave the package.
 
@@ -67,12 +67,12 @@ Typed errors (all exported from `@erq/connectors`), as handled by `processSyncPa
 
 | Error | Effect |
 |---|---|
-| `RateLimitedError(retryAfterMs)` | Returns `delayed`. The worker enqueues the same job again after the delay. No retry attempt is consumed. |
-| `TransientError`, and any unknown error | Rethrown. BullMQ retries (5 attempts, exponential backoff from 5 s). After the last attempt the worker marks the run failed. |
+| `RateLimitedError(retryAfterMs)` | Returns `delayed`. The worker enqueues the same job again after the delay. No retry attempt is consumed. (The Shopify connector first waits out a `THROTTLED` query in place and only then throws this; see below.) |
+| `TransientError`, and any unknown error | Rethrown. BullMQ retries (5 attempts, exponential backoff from 5 s). After the last attempt the worker marks the run failed (`failSyncRun`, which sanitizes the raw error text). |
 | `AuthError` | Cursor and run marked failed, `store_connections.status` set to `error` with the message. Returns `failed`. No retry. |
 | `PermanentError` | Cursor and run marked failed. Returns `failed`. No retry. |
 
-Stored error messages are truncated (500 characters) and must not contain credentials.
+Stored error messages go through `sanitizeMessage` (tokens, secrets and query strings removed) and are truncated to 500 characters, on every path including `failSyncRun` after the last queue attempt. Cursor `last_error` is shown to every org member through `GET /orgs/:orgId/connections`.
 
 Testing: `@erq/connectors/testing` exports `FakeConnector` (scripted pages and errors, records calls), the sample data, and `runConnectorContract(subject)`, a shared Vitest suite every connector must pass (finite pages, advancing cursors, only the normalized fields, valid dates and integer cents). Register the connector with `ConnectorRegistry.register(platform, connector)`.
 
@@ -131,9 +131,10 @@ Queue: `BullMqJobQueue` adds jobs named `page` to the `sync` queue with 5 attemp
 `packages/connectors/src/shopify` implements `fetchPage` for locations, products, inventory and orders with paginated Admin GraphQL queries (details, page sizes and error mapping in `docs/shopify-connection.md` section 9).
 
 - **Cursor.** Opaque to the engine: base64url of `{"v":1,"after":<Shopify endCursor or null>}`. Anything that does not decode to exactly that (and re-encode identically) is a permanent error "Invalid sync cursor." A page that reports `hasNextPage` without an `endCursor` is a permanent error rather than a loop.
-- **Filters.** A backfill (`options.since`) imports all products, inventory and locations, and filters orders by `created_at >= since` (sorted by creation). An incremental run (`options.updatedSince`) filters products, inventory items and orders by `updated_at >= updatedSince` (orders sorted by update time). `ordersBackfillSince(grantedScopes, now)` in `packages/sync/src/history.ts` returns now minus 365 days when `read_all_orders` is granted, otherwise 60 days; the API passes the connection's stored (granted) scopes.
+- **Filters.** A backfill (`options.since`) imports all products, inventory and locations, and filters orders by `created_at >= since` (sorted by creation). An incremental run (`options.updatedSince`) filters products and orders by `updated_at >= updatedSince` (orders sorted by update time). Inventory ignores `updatedSince` and always reads every item and level, because an inventory item's `updated_at` does not move when only a quantity changes; a full pass is safe (no history window, idempotent sink) and is kept until 1b-3c has a better change signal.
+- **Throttling.** A GraphQL `THROTTLED` response is waited out in place: the client sleeps the time the throttle status asks for (clamped 500 to 60000 ms) and resends the same query, at most 5 times and 60 s in total per query, then throws `RateLimitedError`. Without this, a page with many follow-up queries could drain the bucket mid-page and the re-run page would start from its first query against an empty bucket again, possibly forever. No pacing before a query is done from `throttleStatus.currentlyAvailable`. `ordersBackfillSince(grantedScopes, now)` in `packages/sync/src/history.ts` returns now minus 365 days when `read_all_orders` is granted, otherwise 60 days; the API passes the connection's stored (granted) scopes.
 - **Nested-list bounds.** Variants, inventory levels, order lines, refunds, refund lines and refund shipping lines are requested inline up to a small cap; a longer list is read with follow-up queries, bounded by `MAX_EXTRA_PAGES` (20) per parent and at most 20 refunds per order. Beyond the bound the page fails loudly instead of truncating.
-- **Connection health.** At the real end of a chain the engine sets `store_connections.last_synced_at` and returns an `error` connection to `active` (only when no resource is running or failed). A job re-queued by `resumeStalledRuns` carries `resumed: true` and records neither. `failRun` leaves disconnected and demo connections untouched (only `active`, `pending` and `error` connections can become `error`).
+- **Connection health.** At the real end of a chain the engine sets `store_connections.last_synced_at` and returns an `error` connection to `active` (only when no resource is running or failed). In the same locked update it clears `last_error` when it is exactly `IMPORT_NOT_STARTED_MESSAGE` ("Could not start the first import. Use Sync now.", exported from `@erq/sync` and stored by the OAuth callback), so that warning never outlives a finished import; any other warning on an active connection is kept. A job re-queued by `resumeStalledRuns` carries `resumed: true` and records neither. `failRun` leaves disconnected and demo connections untouched (only `active`, `pending` and `error` connections can become `error`).
 - **Sync queue producer (API).** `BullMqSyncQueue` (`apps/api/src/connections/sync-queue.ts`) adds jobs named `page` to the queue `sync` with the same options as the worker's `BullMqJobQueue`: 5 attempts, exponential backoff from 5 s, retention of 1000 completed and 5000 failed jobs. Without `REDIS_URL` a `NoopSyncQueue` is used and `available` is false. If `enqueueSync` cannot queue the first job it marks the run failed and frees the cursor before rethrowing; the OAuth callback bounds the start to 5 seconds.
 - **Reconnect.** A reconnect of a finished shop starts a full backfill again (idempotent sinks make that safe).
 
@@ -143,9 +144,9 @@ A reconnect of a finished shop starts a new full backfill, and a reconnect while
 
 ## Known gaps (1b-3c)
 
-- No scheduler: nothing starts incremental syncs by itself, and webhook events do not trigger them. Incremental `updated_at` filters miss cost-only and quantity-only changes, so a periodic full sync is also needed.
+- No scheduler: nothing starts incremental syncs by itself, and webhook events do not trigger them. The products `updated_at` filter misses cost-only changes, so a periodic full sync is also needed. Inventory already takes a full pass on every run (see above), which costs a full read of every item on each Sync now.
 - No order-line link-up pass for lines whose variant was unknown.
-- No Shopify token refresh (expiring offline tokens), and `failed` webhook events are not swept.
+- No Shopify token refresh (expiring offline tokens). Failed privacy webhook events are re-listed by the sweep (migration 0021); other failed webhook events are still terminal and nothing alerts on them.
 - Single-resource runs set `last_synced_at` for the whole connection (revisit with per-resource timestamps); an outdated `last_error` can remain visible.
 - The connection-health row lock (`SELECT ... FOR UPDATE` before the recovery update) has no test that interleaves two writers.
 - On an enqueue timeout the run and cursor stay `running` until the stalled-run resumer acts.
@@ -153,5 +154,5 @@ A reconnect of a finished shop starts a new full backfill, and a reconnect while
 
 - Sync now checks the connection status and running cursors, then starts, in separate transactions: a disconnect or a second click in that window can still race (sinks are idempotent, so the cost is a wasted run).
 - The `connection.sync_requested` audit row is written after the start, so a crash in between leaves a run without an audit row.
-- `coveredFrom` is `min(placed_at)` per connection with no dedicated `(org_id, store_connection_id, placed_at)` index; fine for now, add one if the list gets slow.
+- `coveredFrom` is `min(placed_at)` of the non-test orders (`is_test = false`) per connection with no dedicated `(org_id, store_connection_id, placed_at)` index; fine for now, add one if the list gets slow.
 - Summary wording is minimal: `failed` shows only the first failed resource's stored error, and a connection that finished some but not all resources reads as `never`.

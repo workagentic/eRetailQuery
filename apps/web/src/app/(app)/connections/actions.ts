@@ -1,6 +1,6 @@
 'use server';
 
-import type { InstallResponse } from '@erq/shared';
+import type { InstallResponse, SyncNowResponse } from '@erq/shared';
 import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { apiFetch, ApiRequestError } from '@/lib/api';
@@ -53,4 +53,34 @@ export async function disconnectConnection(formData: FormData): Promise<void> {
   }
   if (failed) redirect('/connections?shopify_error=disconnect_failed');
   revalidatePath('/connections');
+}
+
+export interface SyncNowState {
+  error?: string;
+  started?: boolean;
+}
+
+const SYNC_FAILED = 'We could not start the import. Please try again.';
+
+// 409 (connection not active) and 503 (imports not available) carry plain API messages worth showing.
+export async function syncNowAction(
+  _prev: SyncNowState | undefined,
+  formData: FormData,
+): Promise<SyncNowState> {
+  const id = formData.get('id');
+  if (typeof id !== 'string' || id === '') return { error: SYNC_FAILED };
+  try {
+    const { active } = await loadAppContext();
+    const res = await apiFetch<SyncNowResponse>(
+      `/orgs/${active.orgId}/connections/${encodeURIComponent(id)}/sync`,
+      { method: 'POST', orgId: active.orgId },
+    );
+    revalidatePath('/connections');
+    return { started: res.started };
+  } catch (e) {
+    if (e instanceof ApiRequestError && (e.status === 409 || e.status === 503)) {
+      return { error: e.message };
+    }
+    return { error: SYNC_FAILED };
+  }
 }

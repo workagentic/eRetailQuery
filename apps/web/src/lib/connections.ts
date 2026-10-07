@@ -1,4 +1,4 @@
-import type { ConnectionDto } from '@erq/shared';
+import type { ConnectionDto, ConnectionSyncDto } from '@erq/shared';
 
 const GENERIC_ERROR = 'Something went wrong connecting to Shopify. Please try again.';
 
@@ -94,6 +94,118 @@ export function describeConnection(c: ConnectionDto, now: Date): ConnectionView 
         canReconnect: false,
       };
   }
+}
+
+export interface SyncView {
+  headline: string;
+  detail: string | null;
+  tone: 'ok' | 'warn' | 'muted';
+  canSync: boolean;
+}
+
+const RESOURCE_LABELS: Record<string, string> = {
+  locations: 'locations',
+  products: 'products',
+  inventory: 'stock levels',
+  orders: 'orders',
+};
+
+function resourceLabel(resource: string | null): string {
+  return resource !== null && Object.hasOwn(RESOURCE_LABELS, resource)
+    ? (RESOURCE_LABELS[resource] as string)
+    : 'your data';
+}
+
+function coverageText(sync: ConnectionSyncDto): string | null {
+  const parts: string[] = [];
+  if (sync.coveredFrom) {
+    const t = new Date(sync.coveredFrom);
+    if (!Number.isNaN(t.getTime())) {
+      const date = t.toLocaleDateString('en-US', {
+        timeZone: 'UTC',
+        month: 'short',
+        day: 'numeric',
+        year: 'numeric',
+      });
+      parts.push(`Showing orders from ${date}.`);
+    }
+  }
+  if (sync.historyLimited) {
+    parts.push("Older history needs Shopify's approval to read all orders.");
+  }
+  return parts.length > 0 ? parts.join(' ') : null;
+}
+
+const join = (...parts: (string | null)[]): string | null => {
+  const kept = parts.filter((p): p is string => p !== null && p !== '');
+  return kept.length > 0 ? kept.join(' ') : null;
+};
+
+/**
+ * Plain-English sync status for one connection. It combines the import state with the
+ * connection's own status and error so a broken connection is never shown as up to date.
+ */
+export function describeSync(
+  sync: ConnectionSyncDto,
+  lastSyncedAt: string | null,
+  now: Date,
+  connection?: Pick<ConnectionDto, 'status' | 'lastError'>,
+): SyncView {
+  const coverage = coverageText(sync);
+  const usable =
+    connection === undefined || connection.status === 'active' || connection.status === 'error';
+  const canSync = sync.canStart && usable;
+  const synced = `Last synced ${relativeTime(lastSyncedAt, now)}`;
+
+  if (connection?.status === 'disconnected') {
+    return {
+      headline: 'Not connected',
+      detail: join('Reconnect this store to import your data.', coverage),
+      tone: 'muted',
+      canSync: false,
+    };
+  }
+  if (sync.state === 'running') {
+    return {
+      headline: `Importing ${resourceLabel(sync.resource)}, ${sync.recordsProcessed.toLocaleString('en-US')} so far`,
+      detail: coverage,
+      tone: 'muted',
+      canSync: false,
+    };
+  }
+  if (sync.state === 'failed') {
+    const where = `Stopped while importing ${resourceLabel(sync.resource)}.`;
+    const lastGood = lastSyncedAt
+      ? `Last successful sync ${relativeTime(lastSyncedAt, now)}.`
+      : null;
+    return {
+      headline: 'Import stopped',
+      detail: join(where, sync.error ?? 'Try Sync now.', lastGood, coverage),
+      tone: 'warn',
+      canSync,
+    };
+  }
+  const inError = connection?.status === 'error';
+  if (inError) {
+    const why = `${connection.lastError ?? 'Something went wrong with this connection.'} ${synced}`;
+    return {
+      headline: sync.state === 'never' ? 'Not imported yet' : 'Not up to date',
+      detail: join(why, coverage),
+      tone: 'warn',
+      canSync,
+    };
+  }
+  if (sync.state === 'never') {
+    return {
+      headline: 'Not imported yet',
+      detail: sync.canStart
+        ? 'Press Sync now to start.'
+        : 'Importing is not available on this server yet.',
+      tone: 'muted',
+      canSync,
+    };
+  }
+  return { headline: 'Up to date', detail: join(synced, coverage), tone: 'ok', canSync };
 }
 
 // Mirror of SHOP_RE in packages/connectors/src/shopify/domain.ts (one DNS label); keep them identical.

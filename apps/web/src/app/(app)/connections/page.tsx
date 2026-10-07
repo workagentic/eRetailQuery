@@ -2,10 +2,12 @@ import { Card, CardContent, CardHeader, CardTitle } from '@erq/ui';
 import { hasRole, type ConnectionDto } from '@erq/shared';
 import { ConnectShopify, ReconnectShopify } from '@/components/connect-shopify';
 import { DisconnectButton } from '@/components/disconnect-button';
+import { SyncNowButton } from '@/components/sync-now-button';
 import { apiFetch } from '@/lib/api';
 import { loadAppContext } from '@/lib/app-context';
 import {
   describeConnection,
+  describeSync,
   connectionsErrorMessage,
   shopifyWarningMessage,
   type ConnectionView,
@@ -95,6 +97,8 @@ export default async function ConnectionsPage({
             <ul className="divide-y divide-border">
               {connections.map((c) => {
                 const v = describeConnection(c, now);
+                const s = describeSync(c.sync, c.lastSyncedAt, now, c);
+                const syncId = `sync-${c.id}`;
                 return (
                   <li
                     key={c.id}
@@ -103,6 +107,16 @@ export default async function ConnectionsPage({
                     <div className="min-w-0">
                       <p className="break-all font-medium">{c.shop}</p>
                       <p className="text-sm text-muted-foreground">{v.detail}</p>
+                      <div id={syncId} className="mt-1 text-sm">
+                        <p
+                          className={
+                            s.tone === 'warn' ? 'font-medium text-destructive' : 'font-medium'
+                          }
+                        >
+                          {s.headline}
+                        </p>
+                        {s.detail && <p className="text-muted-foreground">{s.detail}</p>}
+                      </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
                       <span className={`rounded-full px-2 py-0.5 text-xs ${TONE_CLASS[v.tone]}`}>
@@ -110,6 +124,14 @@ export default async function ConnectionsPage({
                       </span>
                       {isAdmin && c.platform === 'shopify' && v.canReconnect && (
                         <ReconnectShopify shop={c.shop} />
+                      )}
+                      {isAdmin && c.platform === 'shopify' && c.status !== 'disconnected' && (
+                        <SyncNowButton
+                          id={c.id}
+                          shop={c.shop}
+                          canSync={s.canSync}
+                          describedBy={syncId}
+                        />
                       )}
                       {isAdmin && c.status !== 'disconnected' && c.status !== 'demo' && (
                         <DisconnectButton id={c.id} shop={c.shop} />

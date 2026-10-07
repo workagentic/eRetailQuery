@@ -266,7 +266,7 @@ const count = async (sql: string, params: unknown[]) =>
 
 const ids = {
   aDisc: 'aaaaaaaa-0000-4000-8000-000000000001',
-  bErr: 'bbbbbbbb-0000-4000-8000-000000000002',
+  bDisc: 'bbbbbbbb-0000-4000-8000-000000000002',
   cActive: 'cccccccc-0000-4000-8000-000000000003',
   aOther: 'aaaaaaaa-0000-4000-8000-000000000004',
 };
@@ -278,7 +278,7 @@ beforeAll(async () => {
     await owner.query(`insert into orgs (id, name, slug) values ($1, $2, $2)`, [org, slug]);
   }
   await conn(A, SHOP, 'disconnected', ids.aDisc);
-  await conn(B, SHOP, 'error', ids.bErr);
+  await conn(B, SHOP, 'disconnected', ids.bDisc);
   await conn(C, SHOP, 'active', ids.cActive);
   await conn(A, OTHER, 'disconnected', ids.aOther);
   // ledger data on the connections to prove it is removed too
@@ -299,9 +299,10 @@ afterAll(async () => {
 });
 
 describe('app_purge_shop', () => {
-  it('purges every disconnected or errored connection of the shop across orgs, never an active one', async () => {
+  // Task 3 adds a unique index: a shop can have only ONE non-disconnected connection, so the 'error' case below uses its own shop.
+  it('purges every disconnected connection of the shop across orgs, never an active one', async () => {
     expect(await api.purgeShop('shopify', SHOP)).toBe(2);
-    expect(await count('store_connections where id = any($1)', [[ids.aDisc, ids.bErr]])).toBe(0);
+    expect(await count('store_connections where id = any($1)', [[ids.aDisc, ids.bDisc]])).toBe(0);
     expect(await count('inventory_movements where location_id = $1', [ids.aDisc])).toBe(0);
     expect(await count('store_connections where id = $1', [ids.cActive])).toBe(1);
     expect(await count('store_connections where id = $1', [ids.aOther])).toBe(1);
@@ -322,6 +323,13 @@ describe('app_purge_shop', () => {
     expect(await api.purgeShop('shopify', 'nobody.myshopify.com')).toBe(0);
     expect(await api.purgeShop('shopify', SHOP)).toBe(0); // only the active connection is left
     expect(await count(`audit_log where action = 'store_connection.purged'`, [])).toBe(before);
+  });
+  it('also purges errored connections', async () => {
+    const ERR = 'err.myshopify.com';
+    await conn(A, ERR, 'error', 'aaaaaaaa-0000-4000-8000-000000000005');
+    await conn(B, ERR, 'disconnected', 'bbbbbbbb-0000-4000-8000-000000000006');
+    expect(await api.purgeShop('shopify', ERR)).toBe(2);
+    expect(await count('store_connections where external_account_id = $1', [ERR])).toBe(0);
   });
   it('has the standard definer hygiene', async () => {
     const { rows } = await owner.query(

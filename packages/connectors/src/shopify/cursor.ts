@@ -33,6 +33,13 @@ export const ORDER_LINES_EXTRA_PAGE_SIZE = 100;
 export const ORDER_REFUNDS_INLINE = 5;
 export const REFUND_LINES_INLINE = 5;
 export const REFUND_SHIPPING_INLINE = 2;
+// Follow-up queries (each requested cost stays under 1000; tests derive it from the `first` sent):
+// Order.refunds is a plain list with no cursor, so an order with more than ORDER_REFUNDS_INLINE
+// refunds is re-read in one ErqOrderRefunds call of ORDER_REFUNDS_MAX + 1 refunds (1 + 21 * 35 = 736).
+// Refund lines and shipping lines are connections and page 100 at a time (405 and 305 points).
+export const ORDER_REFUNDS_MAX = 20;
+export const REFUND_LINES_EXTRA_PAGE_SIZE = 100;
+export const REFUND_SHIPPING_EXTRA_PAGE_SIZE = 100;
 /**
  * Extra variant pages fetched for one product before the import fails loudly. Per-job ceiling:
  * one products page can issue up to PRODUCTS_PAGE_SIZE * MAX_EXTRA_PAGES extra variant queries.

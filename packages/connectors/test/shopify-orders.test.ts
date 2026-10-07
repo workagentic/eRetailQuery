@@ -6,6 +6,10 @@ import {
   MAX_EXTRA_PAGES,
   normalizeOrder,
   ORDER_LINES_EXTRA_PAGE_SIZE,
+  ORDER_REFUNDS_MAX,
+  REFUND_LINES_EXTRA_PAGE_SIZE,
+  REFUND_SHIPPING_EXTRA_PAGE_SIZE,
+  TransientError,
   ORDER_LINES_INLINE,
   ORDER_REFUNDS_INLINE,
   ORDERS_PAGE_SIZE,
@@ -17,6 +21,9 @@ import {
   FakeShopifyAdmin,
   gqlOk,
   orderLinesQueryCost,
+  orderRefundsQueryCost,
+  refundLinesQueryCost,
+  refundShippingQueryCost,
   ordersQueryCost,
   paginate,
 } from '../src/testing';
@@ -47,6 +54,14 @@ const refundLine = (n: number, qty: number, subtotal: string, restockType = 'RET
   lineItem: { id: gid('LineItem', n) },
   subtotalSet: money(subtotal),
 });
+const inline = (nodes: unknown[], size: number) => {
+  const more = nodes.length > size;
+  return {
+    nodes: nodes.slice(0, size),
+    pageInfo: { hasNextPage: more, endCursor: more ? String(size - 1) : null },
+  };
+};
+const shippingNode = (amount: string) => ({ subtotalAmountSet: money(amount) });
 const refund = (
   n: number,
   lines: unknown[],
@@ -57,13 +72,25 @@ const refund = (
   id: gid('Refund', n),
   createdAt: '2026-03-03T10:00:00Z',
   totalRefundedSet: money(total),
-  refundLineItems: { nodes: lines, pageInfo: { hasNextPage: false, endCursor: null } },
-  refundShippingLines: {
-    nodes: shipping.map((s) => ({ subtotalAmountSet: money(s) })),
-    pageInfo: { hasNextPage: false, endCursor: null },
-  },
+  refundLineItems: inline(lines, REFUND_LINES_INLINE),
+  refundShippingLines: inline(shipping.map(shippingNode), REFUND_SHIPPING_INLINE),
   ...over,
 });
+/** Follow-up handlers over the complete data; cursors are indexes, matching `inline` above. */
+const refundsHandler = (all: unknown[]) => (v: Record<string, unknown>) =>
+  gqlOk({ order: { refunds: all.slice(0, v.first as number) } });
+const refundConnHandler =
+  (field: 'refundLineItems' | 'refundShippingLines', byRefund: Record<string, unknown[]>) =>
+  (v: Record<string, unknown>) =>
+    gqlOk({
+      node: {
+        [field]: paginate(
+          byRefund[v.id as string]!,
+          v.first as number,
+          (v.after as string | null) ?? null,
+        ),
+      },
+    });
 const connection = (nodes: unknown[]) => {
   const more = nodes.length > ORDER_LINES_INLINE;
   return {
@@ -82,6 +109,7 @@ const order = (n: number, over: Record<string, unknown> = {}) => {
     cancelledAt: null as string | null,
     closedAt: null as string | null,
     test: false,
+    taxesIncluded: false,
     sourceName: 'web' as string | null,
     totalDiscountsSet: money('0.00'),
     totalTaxSet: money('0.00'),
@@ -134,6 +162,25 @@ const failureOf = async (p: Promise<unknown>): Promise<string> => {
   );
   expect(err).toBeInstanceOf(PermanentError);
   return (err as PermanentError).message;
+};
+
+const transientOf = async (p: Promise<unknown>): Promise<string> => {
+  const err = await p.then(
+    () => null,
+    (e: unknown) => e,
+  );
+  expect(err).toBeInstanceOf(TransientError);
+  return (err as TransientError).message;
+};
+const sentBody = (admin: FakeShopifyAdmin, name: string) => {
+  const req = admin.requests.find((r) => JSON.parse(r.body!).operationName === name);
+  if (!req) throw new Error(`no ${name} request`);
+  return JSON.parse(req.body!) as { query: string; variables: { first: number } };
+};
+const sizeIn = (query: string, field: string): number => {
+  const m = new RegExp(`${field}\\(first: (\\d+)`).exec(query);
+  if (!m) throw new Error(`no first on ${field}`);
+  return Number(m[1]);
 };
 
 describe('orders', () => {
@@ -332,7 +379,7 @@ describe('orders', () => {
   });
 
   it('pages by the orders page size and round-trips the cursor', async () => {
-    const total = ORDERS_PAGE_SIZE * 20 + ORDERS_PAGE_SIZE;
+    const total = ORDERS_PAGE_SIZE * 20 + 1;
     const items = Array.from({ length: total }, (_, i) => order(i + 1));
     const admin = new FakeShopifyAdmin().on('ErqOrders', ordersHandler(items));
     let cursor: string | null = null;
@@ -351,7 +398,8 @@ describe('orders', () => {
     } while (cursor !== null);
     expect(decodeCursor(firstCursor)).toBe(String(ORDERS_PAGE_SIZE - 1));
     expect(sizes).toHaveLength(21);
-    expect(sizes.every((s) => s === ORDERS_PAGE_SIZE)).toBe(true);
+    expect(sizes.slice(0, -1).every((s) => s === ORDERS_PAGE_SIZE)).toBe(true);
+    expect(sizes[sizes.length - 1]).toBe(1);
     expect(sizes.reduce((a, b) => a + b, 0)).toBe(total);
   });
 
@@ -410,34 +458,182 @@ describe('orders', () => {
     expect(await failureOf(fetchOne(dup))).toBe(UNEXPECTED);
   });
 
-  it('fails when a refund has more lines than fit inline', async () => {
-    const r = refund(1, [], '1.00', [], {
-      refundLineItems: {
-        nodes: [refundLine(1, 1, '1.00')],
-        pageInfo: { hasNextPage: true, endCursor: 'x' },
-      },
-    });
-    expect(await failureOf(fetchOne(order(1, { refunds: [r] })))).toBe(
-      'An order has too many refund lines to import.',
+  it('fetches the rest of an order with more refunds than fit inline', async () => {
+    const all = Array.from({ length: ORDER_REFUNDS_INLINE + 3 }, (_, i) =>
+      refund(i + 1, [refundLine(1, 1, '1.00')], '1.00'),
     );
-    const s = refund(2, [], '1.00', ['1.00'], {
-      refundShippingLines: {
-        nodes: [{ subtotalAmountSet: money('1.00') }],
-        pageInfo: { hasNextPage: true, endCursor: 'x' },
-      },
-    });
-    expect(await failureOf(fetchOne(order(2, { refunds: [s] })))).toBe(
-      'An order has too many refund lines to import.',
+    const admin = new FakeShopifyAdmin()
+      .on(
+        'ErqOrders',
+        ordersHandler([order(1, { refunds: all.slice(0, ORDER_REFUNDS_INLINE + 1) })]),
+      )
+      .on('ErqOrderRefunds', refundsHandler(all));
+    const page = await fetchOrders(gqlOf(admin), ctx, null, {});
+    expect(page.items[0]!.refunds.map((r) => r.externalId)).toEqual(all.map((r) => r.id));
+    expect(admin.callsOf('ErqOrderRefunds')).toBe(1);
+  });
+
+  it('fails clearly beyond the refunds ceiling', async () => {
+    const all = Array.from({ length: ORDER_REFUNDS_MAX + 5 }, (_, i) => refund(i + 1, [], '1.00'));
+    const admin = new FakeShopifyAdmin()
+      .on(
+        'ErqOrders',
+        ordersHandler([order(1, { refunds: all.slice(0, ORDER_REFUNDS_INLINE + 1) })]),
+      )
+      .on('ErqOrderRefunds', refundsHandler(all));
+    expect(await failureOf(fetchOrders(gqlOf(admin), ctx, null, {}))).toBe(
+      'An order has too many refunds to import.',
     );
   });
 
-  it('fails instead of truncating when an order has more refunds than supported', async () => {
-    const refunds = Array.from({ length: ORDER_REFUNDS_INLINE + 1 }, (_, i) =>
+  it('fetches the remaining lines of a refund that restocks a big order', async () => {
+    const total = REFUND_LINES_INLINE + REFUND_LINES_EXTRA_PAGE_SIZE + 5;
+    const lines = Array.from({ length: total }, (_, i) => refundLine(i + 1, 1, '2.00'));
+    const r = refund(1, lines, '999.00');
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [r] })]))
+      .on('ErqRefundLines', refundConnHandler('refundLineItems', { [r.id]: lines }));
+    const page = await fetchOrders(gqlOf(admin), ctx, null, {});
+    const out = page.items[0]!.refunds[0]!;
+    expect(out.lines).toHaveLength(total);
+    expect(out.amountCents).toBe(total * 200);
+    expect(admin.callsOf('ErqRefundLines')).toBe(2);
+  });
+
+  it('fetches shipping refund lines beyond the inline size and sums them', async () => {
+    const shipping = Array.from({ length: REFUND_SHIPPING_INLINE + 3 }, () => '1.00');
+    const r = refund(1, [], '100.00', shipping);
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [r] })]))
+      .on(
+        'ErqRefundShipping',
+        refundConnHandler('refundShippingLines', { [r.id]: shipping.map(shippingNode) }),
+      );
+    const page = await fetchOrders(gqlOf(admin), ctx, null, {});
+    expect(page.items[0]!.refunds[0]!.shippingRefundCents).toBe(shipping.length * 100);
+    expect(admin.callsOf('ErqRefundShipping')).toBe(1);
+  });
+
+  it('fails clearly past the extra page ceiling for refund lines', async () => {
+    const total = REFUND_LINES_INLINE + (MAX_EXTRA_PAGES + 1) * REFUND_LINES_EXTRA_PAGE_SIZE;
+    const lines = Array.from({ length: total }, (_, i) => refundLine(i + 1, 1, '1.00'));
+    const r = refund(1, lines, '1.00');
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [r] })]))
+      .on('ErqRefundLines', refundConnHandler('refundLineItems', { [r.id]: lines }));
+    expect(await failureOf(fetchOrders(gqlOf(admin), ctx, null, {}))).toBe(
+      'An order has too many refund lines to import.',
+    );
+    expect(admin.callsOf('ErqRefundLines')).toBe(MAX_EXTRA_PAGES);
+  });
+
+  it('fails instead of looping when refund connections lose their cursor', async () => {
+    const noCursor = { nodes: [], pageInfo: { hasNextPage: true, endCursor: null } };
+    const inlineLines = refund(1, [], '1.00', [], { refundLineItems: noCursor });
+    const inlineShip = refund(2, [], '1.00', [], { refundShippingLines: noCursor });
+    for (const r of [inlineLines, inlineShip]) {
+      const admin = new FakeShopifyAdmin().on(
+        'ErqOrders',
+        ordersHandler([order(1, { refunds: [r] })]),
+      );
+      expect(await failureOf(fetchOrders(gqlOf(admin), ctx, null, {}))).toBe(UNEXPECTED);
+      expect(admin.requests).toHaveLength(1);
+    }
+    // A follow-up page that says hasNextPage without a cursor must also stop.
+    const lines = Array.from({ length: REFUND_LINES_INLINE + 1 }, (_, i) =>
+      refundLine(i + 1, 1, '1.00'),
+    );
+    const r = refund(3, lines, '1.00');
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [r] })]))
+      .on('ErqRefundLines', () => gqlOk({ node: { refundLineItems: noCursor } }));
+    expect(await failureOf(fetchOrders(gqlOf(admin), ctx, null, {}))).toBe(UNEXPECTED);
+    expect(admin.callsOf('ErqRefundLines')).toBe(1);
+    const ship = Array.from({ length: REFUND_SHIPPING_INLINE + 1 }, () => '1.00');
+    const r2 = refund(4, [], '1.00', ship);
+    const admin2 = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [r2] })]))
+      .on('ErqRefundShipping', () => gqlOk({ node: { refundShippingLines: noCursor } }));
+    expect(await failureOf(fetchOrders(gqlOf(admin2), ctx, null, {}))).toBe(UNEXPECTED);
+    expect(admin2.callsOf('ErqRefundShipping')).toBe(1);
+  });
+
+  it('retries (transient) when a refund or its order vanishes between queries', async () => {
+    const all = Array.from({ length: ORDER_REFUNDS_INLINE + 1 }, (_, i) =>
       refund(i + 1, [], '1.00'),
     );
-    expect(await failureOf(fetchOne(order(1, { refunds })))).toBe(
-      'An order has too many refunds to import.',
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: all })]))
+      .on('ErqOrderRefunds', () => gqlOk({ order: null }));
+    await transientOf(fetchOrders(gqlOf(admin), ctx, null, {}));
+    const lines = Array.from({ length: REFUND_LINES_INLINE + 1 }, (_, i) =>
+      refundLine(i + 1, 1, '1.00'),
     );
+    const admin2 = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [refund(1, lines, '1.00')] })]))
+      .on('ErqRefundLines', () => gqlOk({ node: null }));
+    await transientOf(fetchOrders(gqlOf(admin2), ctx, null, {}));
+    const ship = Array.from({ length: REFUND_SHIPPING_INLINE + 1 }, () => '1.00');
+    const admin3 = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [refund(1, [], '1.00', ship)] })]))
+      .on('ErqRefundShipping', () => gqlOk({ node: null }));
+    await transientOf(fetchOrders(gqlOf(admin3), ctx, null, {}));
+  });
+
+  it('keeps every follow-up query under the 1000 point cost cap', async () => {
+    const refunds = Array.from({ length: ORDER_REFUNDS_INLINE + 1 }, (_, i) =>
+      refund(
+        i + 1,
+        Array.from({ length: REFUND_LINES_INLINE + 1 }, (_, j) => refundLine(j + 1, 1, '1.00')),
+        '1.00',
+        ['1.00', '1.00', '1.00'],
+      ),
+    );
+    const lineMap = Object.fromEntries(
+      refunds.map((r) => [
+        r.id,
+        Array.from({ length: REFUND_LINES_INLINE + 1 }, (_, j) => refundLine(j + 1, 1, '1.00')),
+      ]),
+    );
+    const shipMap = Object.fromEntries(
+      refunds.map((r) => [r.id, ['1.00', '1.00', '1.00'].map(shippingNode)]),
+    );
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds })]))
+      .on('ErqOrderRefunds', refundsHandler(refunds))
+      .on('ErqRefundLines', refundConnHandler('refundLineItems', lineMap))
+      .on('ErqRefundShipping', refundConnHandler('refundShippingLines', shipMap));
+    await fetchOrders(gqlOf(admin), ctx, null, {});
+    // Sizes come from what was actually sent. https://shopify.dev/docs/api/usage/limits#cost-calculation
+    const refundsBody = sentBody(admin, 'ErqOrderRefunds');
+    expect(
+      orderRefundsQueryCost(
+        refundsBody.variables.first,
+        sizeIn(refundsBody.query, 'refundLineItems'),
+        sizeIn(refundsBody.query, 'refundShippingLines'),
+      ),
+    ).toBeLessThan(1000);
+    expect(refundLinesQueryCost(sentBody(admin, 'ErqRefundLines').variables.first)).toBeLessThan(
+      1000,
+    );
+    expect(
+      refundShippingQueryCost(sentBody(admin, 'ErqRefundShipping').variables.first),
+    ).toBeLessThan(1000);
+    expect(sentBody(admin, 'ErqRefundLines').variables.first).toBe(REFUND_LINES_EXTRA_PAGE_SIZE);
+    expect(sentBody(admin, 'ErqRefundShipping').variables.first).toBe(
+      REFUND_SHIPPING_EXTRA_PAGE_SIZE,
+    );
+  });
+
+  it('requests taxesIncluded and still parses a tax-inclusive order unchanged', async () => {
+    const admin = new FakeShopifyAdmin().on(
+      'ErqOrders',
+      ordersHandler([order(1, { taxesIncluded: true, totalTaxSet: money('3.20') })]),
+    );
+    const page = await fetchOrders(gqlOf(admin), ctx, null, {});
+    expect(sentBody(admin, 'ErqOrders').query).toContain('taxesIncluded');
+    // Documented limitation: the maths is not adjusted, tax is reported as sent.
+    expect(page.items[0]).toMatchObject({ taxCents: 320, grossCents: 1000 });
   });
 
   it('keeps a null variant as a null external variant id', async () => {
@@ -513,12 +709,29 @@ describe('orders', () => {
     expect(await failureOf(fetchOrders(gqlOf(admin), ctx, null, {}))).toBe(UNEXPECTED);
   });
 
-  it('fails when the order disappears while its lines are fetched', async () => {
+  it('retries (transient) when the order disappears while its lines are fetched', async () => {
     const all = Array.from({ length: ORDER_LINES_INLINE + 1 }, (_, i) => line(i + 1, 1, '1.00'));
     const admin = new FakeShopifyAdmin()
       .on('ErqOrders', ordersHandler([order(1, { lines: all })]))
       .on('ErqOrderLines', () => gqlOk({ order: null }));
-    expect(await failureOf(fetchOrders(gqlOf(admin), ctx, null, {}))).toBe(UNEXPECTED);
+    await transientOf(fetchOrders(gqlOf(admin), ctx, null, {}));
+  });
+
+  it('retries (transient) when a line repeats across line pages', async () => {
+    const all = Array.from({ length: ORDER_LINES_INLINE + 1 }, (_, i) => line(i + 1, 1, '1.00'));
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { lines: all })]))
+      .on('ErqOrderLines', () =>
+        gqlOk({
+          order: {
+            lineItems: {
+              nodes: [line(1, 1, '1.00')],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        }),
+      );
+    await transientOf(fetchOrders(gqlOf(admin), ctx, null, {}));
   });
 
   it('rejects a tampered cursor before calling Shopify', async () => {

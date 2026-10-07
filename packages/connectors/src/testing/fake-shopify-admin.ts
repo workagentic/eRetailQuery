@@ -46,6 +46,19 @@ export const ordersQueryCost = (
   return 3 + ordersFirst * (1 + 6 + lines + refundsFirst * refund);
 };
 
+const refundCost = (refundLinesFirst: number, shippingFirst: number): number =>
+  3 + (3 + refundLinesFirst * 4) + (3 + shippingFirst * 3);
+/** Requested cost of the follow-up that re-reads an order's refunds as one list. */
+export const orderRefundsQueryCost = (
+  refundsFirst: number,
+  refundLinesFirst: number,
+  shippingFirst: number,
+): number => 1 + refundsFirst * refundCost(refundLinesFirst, shippingFirst);
+/** Requested cost of a follow-up page of one refund's line items (node + refund + connection). */
+export const refundLinesQueryCost = (linesFirst: number): number => 2 + 3 + linesFirst * 4;
+/** Requested cost of a follow-up page of one refund's shipping lines. */
+export const refundShippingQueryCost = (first: number): number => 2 + 3 + first * 3;
+
 /** Requested cost of the follow-up order lines query: connection 3 plus 6 per line, plus the order. */
 export const orderLinesQueryCost = (linesFirst: number): number => 1 + 3 + linesFirst * 6;
 

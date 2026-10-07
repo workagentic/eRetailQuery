@@ -29,6 +29,15 @@ import { BullMqSyncQueue, NoopSyncQueue, SYNC_QUEUE_NAME, type SyncQueuePort } f
 import { SyncStarter } from './sync-starter';
 import { BullMqWebhookQueue, NoopWebhookQueue, type WebhookQueue } from './webhook-queue';
 
+const SYNC_QUEUE_BOOT_CHECK = Symbol('SYNC_QUEUE_BOOT_CHECK');
+/** Without Redis no sync can start; say so loudly in production instead of failing silently per connect. */
+export function warnIfNoSyncQueue(queue: SyncQueuePort, env: Env, logger: Logger): true {
+  if (!queue.available && env.NODE_ENV === 'production') {
+    logger.warn('REDIS_URL is not set: Shopify syncs cannot start from the API');
+  }
+  return true;
+}
+
 const REDIS_RESOURCES = Symbol('REDIS_RESOURCES');
 interface RedisResources {
   connection: IORedis;
@@ -118,6 +127,11 @@ const providers: Provider[] = [
     inject: [REDIS_RESOURCES],
     useFactory: (res: RedisResources | null): SyncQueuePort =>
       res ? new BullMqSyncQueue(res.syncQueue) : new NoopSyncQueue(),
+  },
+  {
+    provide: SYNC_QUEUE_BOOT_CHECK,
+    inject: [SYNC_QUEUE_PORT, APP_CONFIG, LOGGER],
+    useFactory: warnIfNoSyncQueue,
   },
 ];
 

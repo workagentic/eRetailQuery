@@ -3,6 +3,7 @@ import { PermanentError, SYNC_RESOURCES, type SyncResource } from '@erq/connecto
 import { storeConnections, syncCursors, syncRuns, type Tx } from '@erq/db';
 import type { SyncMode } from '../ports';
 import { nowOf, type SyncDeps } from './deps';
+import { safeMessage } from './fail';
 
 export interface EnqueueSyncArgs {
   orgId: string;
@@ -72,6 +73,38 @@ export async function startRun(
   return { syncRunId: run!.id, created: true };
 }
 
+/** Fails a run whose first job could not be queued. Never throws: the caller rethrows the original error. */
+async function abandonRun(
+  deps: Pick<SyncDeps, 'db'>,
+  args: EnqueueSyncArgs,
+  resource: SyncResource,
+  syncRunId: string,
+  now: Date,
+  err: unknown,
+): Promise<void> {
+  try {
+    const message = safeMessage(err);
+    await deps.db.withTenant(args.orgId, async (tx) => {
+      await tx
+        .update(syncCursors)
+        .set({ status: 'failed', currentSyncRunId: null, lastError: message })
+        .where(
+          and(
+            eq(syncCursors.storeConnectionId, args.connectionId),
+            eq(syncCursors.resource, resource),
+            eq(syncCursors.currentSyncRunId, syncRunId),
+          ),
+        );
+      await tx
+        .update(syncRuns)
+        .set({ status: 'failed', error: message, finishedAt: now })
+        .where(and(eq(syncRuns.id, syncRunId), eq(syncRuns.status, 'running')));
+    });
+  } catch {
+    // Best effort; the stalled-run resumer is the backstop.
+  }
+}
+
 /**
  * Starts a sync for a connection. With several resources, only the first starts now; the rest are chained in the job
  * and start when their predecessor finishes (locations, products, inventory, orders).
@@ -107,16 +140,22 @@ export async function enqueueSync(
   });
   // Enqueue only after the run is committed, so a worker never sees a job whose run does not exist yet.
   if (started.created) {
-    await deps.queue.enqueue({
-      orgId: args.orgId,
-      connectionId: args.connectionId,
-      resource: first,
-      syncRunId: started.syncRunId,
-      then:
-        rest.length > 0
-          ? { resources: rest, mode: args.mode, since: args.since?.toISOString() ?? null }
-          : undefined,
-    });
+    try {
+      await deps.queue.enqueue({
+        orgId: args.orgId,
+        connectionId: args.connectionId,
+        resource: first,
+        syncRunId: started.syncRunId,
+        then:
+          rest.length > 0
+            ? { resources: rest, mode: args.mode, since: args.since?.toISOString() ?? null }
+            : undefined,
+      });
+    } catch (err) {
+      // No job exists for the committed run: release it so a retry can start instead of finding a ghost run.
+      await abandonRun(deps, args, first, started.syncRunId, now, err);
+      throw err;
+    }
   }
   return { resource: first, syncRunId: started.syncRunId, started: started.created };
 }

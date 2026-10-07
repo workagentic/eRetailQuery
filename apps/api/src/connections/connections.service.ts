@@ -50,6 +50,9 @@ import type { WebhookQueue } from './webhook-queue';
 /** How long the webhook receiver waits for the queue before answering anyway (the worker sweep recovers). */
 export const WEBHOOK_ENQUEUE_TIMEOUT_MS = 2000;
 
+/** How long the OAuth callback waits for the first sync to be queued; mutable only so tests can shorten it. */
+export const syncStartTimeout = { ms: 5000 };
+
 const ACTIVE_SHOP_INDEX = 'store_connections_active_shop_uq';
 
 /** True for a Postgres unique violation on the one-active-org-per-shop index (raw or wrapped by Drizzle). */
@@ -201,23 +204,40 @@ export class ConnectionsService {
         );
       }
       // Best effort: a queue failure never breaks the connect. The stored (granted) scopes size the window.
+      // A reconnect of a finished shop starts a new full backfill, and one while a chain is past locations may
+      // overlap it; sinks are idempotent, so this is accepted (docs/sync.md).
       let importFailed = false;
+      let timer: NodeJS.Timeout | undefined;
       try {
-        await this.syncStarter.start({ orgId, connectionId, scopes: token.scopes });
+        await Promise.race([
+          this.syncStarter.start({ orgId, connectionId, scopes: token.scopes }),
+          new Promise<never>((_, reject) => {
+            timer = setTimeout(
+              () => reject(new Error('sync start timed out')),
+              syncStartTimeout.ms,
+            );
+          }),
+        ]);
       } catch (err) {
         importFailed = true;
         this.logger.warn({ err: sanitizeMessage(err) }, 'shopify first import could not start');
+      } finally {
+        clearTimeout(timer);
       }
       if (webhooksOk && !importFailed) return this.redirect({ shopify: 'connected' });
       const lastError = importFailed
         ? 'Could not start the first import. Use Sync now.'
         : 'Webhook setup failed. Reconnect to retry.';
-      await this.db.withTenant(orgId, (tx) =>
-        tx
-          .update(storeConnections)
-          .set({ lastError })
-          .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, connectionId))),
-      );
+      try {
+        await this.db.withTenant(orgId, (tx) =>
+          tx
+            .update(storeConnections)
+            .set({ lastError })
+            .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, connectionId))),
+        );
+      } catch (err) {
+        this.logger.warn({ err: sanitizeMessage(err) }, 'could not store the connection warning');
+      }
       return webhooksOk
         ? this.redirect({ shopify: 'connected' })
         : this.redirect({ shopify: 'connected', warning: 'webhooks' });

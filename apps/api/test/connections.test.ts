@@ -8,6 +8,9 @@ import { hashOAuthNonce, type ConnectionsApi } from '@erq/db';
 import { ORDERS_HISTORY_DAYS, type JobQueue, type SyncPageJob } from '@erq/sync';
 import { EnvKeyProvider } from '@erq/shared';
 import type { SyncQueuePort } from '../src/connections/sync-queue';
+import { syncStartTimeout } from '../src/connections/connections.service';
+import { warnIfNoSyncQueue } from '../src/connections/connections.module';
+import { NoopSyncQueue } from '../src/connections/sync-queue';
 import { CONNECTIONS_API, HTTP_CLIENT, SYNC_QUEUE_PORT } from '../src/connections/tokens';
 import { TENANT_DB } from '../src/db/db.module';
 import { createTestApp, type TestApp } from './helpers/app';
@@ -782,6 +785,10 @@ describe('first backfill after connect', () => {
     });
     await connect(orgId, h);
     expect(syncQueue.jobs).toHaveLength(1);
+    expect(syncQueue.jobs[0]!.then).toMatchObject({
+      mode: 'backfill',
+      resources: ['products', 'inventory', 'orders'],
+    });
     expect(daysBack(syncQueue.jobs[0]!.then!.since!)).toBeGreaterThan(364.9);
     expect(daysBack(syncQueue.jobs[0]!.then!.since!)).toBeLessThan(365.1);
   });
@@ -798,6 +805,50 @@ describe('first backfill after connect', () => {
     expect(rows).toEqual([
       { status: 'active', last_error: 'Could not start the first import. Use Sync now.' },
     ]);
+    // The half-started run is released, so Sync now (or a reconnect) can start again.
+    const runs = await owner.query(`select status from sync_runs where org_id = $1`, [orgId]);
+    expect(runs.rows).toEqual([{ status: 'failed' }]);
+    const cursors = await owner.query(
+      `select status, current_sync_run_id from sync_cursors where org_id = $1`,
+      [orgId],
+    );
+    expect(cursors.rows).toEqual([{ status: 'failed', current_sync_run_id: null }]);
+    syncQueue.fail = false;
+    const retry = await connect(orgId, h);
+    expect(retry.body).toEqual({ redirectTo: connected });
+    expect(syncQueue.jobs).toHaveLength(1);
+  });
+
+  it('answers the callback even when the queue never responds', async () => {
+    const { orgId, h } = await createOrg('Backfill Hang Org');
+    const hang = syncQueue.enqueue.bind(syncQueue);
+    syncQueue.enqueue = () => new Promise<void>(() => undefined);
+    const before = syncStartTimeout.ms;
+    syncStartTimeout.ms = 50;
+    try {
+      const res = await connect(orgId, h);
+      expect(res.body).toEqual({ redirectTo: connected });
+    } finally {
+      syncStartTimeout.ms = before;
+      syncQueue.enqueue = hang;
+    }
+    const { rows } = await owner.query(
+      `select status, last_error from store_connections where org_id = $1`,
+      [orgId],
+    );
+    expect(rows).toEqual([
+      { status: 'active', last_error: 'Could not start the first import. Use Sync now.' },
+    ]);
+  });
+
+  it('warns at boot only when production has no sync queue', () => {
+    const warn = vi.fn();
+    const logger = { warn } as never;
+    warnIfNoSyncQueue(new NoopSyncQueue(), { NODE_ENV: 'development' } as never, logger);
+    warnIfNoSyncQueue(syncQueue, { NODE_ENV: 'production' } as never, logger);
+    expect(warn).not.toHaveBeenCalled();
+    warnIfNoSyncQueue(new NoopSyncQueue(), { NODE_ENV: 'production' } as never, logger);
+    expect(warn).toHaveBeenCalledTimes(1);
   });
 
   it('does nothing and stores no error when no queue is configured', async () => {
@@ -830,11 +881,15 @@ describe('first backfill after connect', () => {
   it('never puts a token, credentials or the callback query in a job', async () => {
     const { orgId, h } = await createOrg('Backfill Secrets Org');
     const state = await startInstall(orgId, h, BF_SHOP);
-    const query = rawSigned(state, BF_SHOP);
+    const query = rawSigned(state, BF_SHOP, { code: 'code-9f3a1c' });
+    fake.respondNext({
+      status: 200,
+      body: JSON.stringify({ access_token: 'shpat_unique_77aa', scope: 'read_orders' }),
+    });
     await callbackAs(authOnly(h), query);
     expect(syncQueue.jobs).toHaveLength(1);
     const payload = JSON.stringify(syncQueue.jobs[0]);
-    for (const secret of ['shpat_', 'good-code', state, 'test-secret', 'accessToken', 'hmac']) {
+    for (const secret of ['shpat_unique_77aa', 'code-9f3a1c', state, 'test-secret', 'hmac']) {
       expect(payload).not.toContain(secret);
     }
   });

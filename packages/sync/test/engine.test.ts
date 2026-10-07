@@ -82,6 +82,37 @@ describe('enqueueSync', () => {
     expect(r).toMatchObject({ resource: 'locations', started: true });
     expect(h.queue.size).toBe(1);
   });
+  it('fails the run and frees the cursor when the first job cannot be queued, then lets a retry start', async () => {
+    const h = makeHarness(env);
+    const failing = {
+      db: h.deps.db,
+      now: h.deps.now,
+      queue: {
+        enqueue: async () => {
+          throw new Error('redis is down');
+        },
+      },
+    };
+    const args = {
+      orgId: ORG_A,
+      connectionId: CONN_A,
+      resources: ['orders' as const],
+      mode: 'backfill' as const,
+      since,
+    };
+    await expect(enqueueSync(failing, args)).rejects.toThrow('redis is down');
+    const c = await cursorRow('orders');
+    expect(c.status).toBe('failed');
+    expect(c.current_sync_run_id).toBeNull();
+    const runs = (await env.owner.query(`select status, error, finished_at from sync_runs`)).rows;
+    expect(runs).toHaveLength(1);
+    expect(runs[0]).toMatchObject({ status: 'failed' });
+    expect(runs[0].error).toContain('redis is down');
+    expect(runs[0].finished_at).not.toBeNull();
+    const retry = await enqueueSync(h.deps, args);
+    expect(retry.started).toBe(true);
+    expect(h.queue.size).toBe(1);
+  });
   it('allows one active run per connection and resource', async () => {
     const h = makeHarness(env);
     const a = await enqueueSync(h.deps, {

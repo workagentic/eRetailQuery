@@ -60,6 +60,12 @@ async function addEvent(
 }
 const status = async (id: string) =>
   (await owner.query(`select status, error from webhook_events where id = $1`, [id])).rows[0];
+const skippedAudits = async () =>
+  (
+    await owner.query(
+      `select entity_id, after_json from audit_log where action = 'privacy.shop_redact_skipped'`,
+    )
+  ).rows;
 const deps = () => ({ db, connections });
 beforeEach(reset);
 
@@ -178,6 +184,7 @@ describe('processWebhookEvent', () => {
       (await owner.query(`select 1 from audit_log where action = 'store_connection.purged'`))
         .rowCount,
     ).toBe(1);
+    expect(await skippedAudits()).toEqual([]);
   });
   it('shop/redact purges every disconnected connection of the shop across orgs and leaves another shop alone', async () => {
     const ORG2 = '55555555-5555-4555-8555-555555555555';
@@ -224,6 +231,22 @@ describe('processWebhookEvent', () => {
     expect(
       (await owner.query(`select 1 from store_connections where id = $1`, [OLD])).rowCount,
     ).toBe(0);
+    expect(await skippedAudits()).toEqual([
+      { entity_id: ORG, after_json: { topic: 'shop/redact', purged: 1 } },
+    ]);
+  });
+  it('shop/redact on a shop with only an active connection purges nothing, closes the event and leaves an audit row', async () => {
+    await owner.query(`insert into products (id, org_id, title) values ($1, $1, 'P')`, [ORG]);
+    const id = await addEvent('shop/redact', { connection: ORG });
+    expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: id })).toBe('processed');
+    expect((await status(id)).status).toBe('processed');
+    expect(
+      (await owner.query(`select 1 from store_connections where id = $1`, [ORG])).rowCount,
+    ).toBe(1);
+    expect((await owner.query(`select 1 from products where id = $1`, [ORG])).rowCount).toBe(1);
+    expect(await skippedAudits()).toEqual([
+      { entity_id: ORG, after_json: { topic: 'shop/redact', purged: 0 } },
+    ]);
   });
   it('shop/redact with a missing connection row closes the event without purging', async () => {
     const id = await addEvent('shop/redact', { connection: ORG });

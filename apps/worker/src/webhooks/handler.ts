@@ -119,10 +119,30 @@ export async function processWebhookEvent(
         return 'processed';
       }
       // Purges every disconnected/errored connection of the shop in every org; an active reinstall is untouched.
-      await deps.connections.purgeShop(conn.platform, conn.shop);
+      const purged = await deps.connections.purgeShop(conn.platform, conn.shop);
       // The cascade removed this event when its own connection was purged; if it was not (an active reinstall owns
       // the shop), close the event normally. The update simply matches zero rows otherwise.
-      await deps.db.withTenant(orgId, (tx) => setStatus(tx, orgId, eventId, 'processed', now()));
+      await deps.db.withTenant(orgId, async (tx) => {
+        const survivor = await tx
+          .select({ id: storeConnections.id })
+          .from(storeConnections)
+          .where(
+            and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, storeConnectionId)),
+          );
+        // A mandatory erasure request that left the event's own connection in place (for example an active one whose
+        // app/uninstalled retries ran out) must not close without a trace: it needs manual follow-up.
+        if (purged === 0 || survivor.length > 0) {
+          await insertAudit(tx, {
+            orgId,
+            actorUserId: null,
+            action: 'privacy.shop_redact_skipped',
+            entityType: 'store_connection',
+            entityId: storeConnectionId,
+            after: { topic: 'shop/redact', purged },
+          });
+        }
+        await setStatus(tx, orgId, eventId, 'processed', now());
+      });
       return 'processed';
     }
     return await deps.db.withTenant(orgId, async (tx) => {

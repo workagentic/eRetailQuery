@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, lt } from 'drizzle-orm';
+import { and, eq, lt, min, sql } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import {
   buildAuthorizeUrl,
@@ -21,17 +21,21 @@ import {
   hashOAuthNonce,
   insertAudit,
   oauthStates,
+  orders,
   orgMembers,
   storeConnections,
+  syncCursors,
   webhookEvents,
   type TenantDb,
 } from '@erq/db';
 import {
   hasRole,
   type ConnectionDto,
+  type ConnectionSyncDto,
   type InstallResponse,
   type KeyProvider,
   type ShopifyErrorCode,
+  type SyncNowResponse,
 } from '@erq/shared';
 import { ApiError } from '../common/api-error';
 import { APP_CONFIG, LOGGER } from '../config/config.module';
@@ -42,8 +46,10 @@ import {
   HTTP_CLIENT,
   KEY_PROVIDER,
   SHOPIFY_CONFIG,
+  SYNC_QUEUE_PORT,
   WEBHOOK_QUEUE_PORT,
 } from './tokens';
+import type { SyncQueuePort } from './sync-queue';
 import { SyncStarter } from './sync-starter';
 import type { WebhookQueue } from './webhook-queue';
 
@@ -52,6 +58,9 @@ export const WEBHOOK_ENQUEUE_TIMEOUT_MS = 2000;
 
 /** How long the OAuth callback waits for the first sync to be queued; mutable only so tests can shorten it. */
 export const syncStartTimeout = { ms: 5000 };
+
+/** Order in which a full import runs; the summary reports the first running or failed resource in this order. */
+const SYNC_RESOURCE_ORDER = ['locations', 'products', 'inventory', 'orders'] as const;
 
 const ACTIVE_SHOP_INDEX = 'store_connections_active_shop_uq';
 
@@ -77,6 +86,7 @@ export class ConnectionsService {
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(WEBHOOK_QUEUE_PORT) private readonly webhookQueue: WebhookQueue,
     private readonly syncStarter: SyncStarter,
+    @Inject(SYNC_QUEUE_PORT) private readonly syncQueue: SyncQueuePort,
   ) {}
 
   private redirect(params: Record<string, string>): string {
@@ -293,10 +303,34 @@ export class ConnectionsService {
 
   list(orgId: string): Promise<ConnectionDto[]> {
     return this.db.withTenant(orgId, async (tx) => {
+      // Three queries for the whole org, grouped in memory: never one per connection.
       const rows = await tx
         .select()
         .from(storeConnections)
+        .where(eq(storeConnections.orgId, orgId))
         .orderBy(storeConnections.createdAt, storeConnections.id);
+      const cursors = await tx
+        .select({
+          connectionId: syncCursors.storeConnectionId,
+          resource: syncCursors.resource,
+          status: syncCursors.status,
+          recordsProcessed: syncCursors.recordsProcessed,
+          lastError: syncCursors.lastError,
+        })
+        .from(syncCursors)
+        .where(eq(syncCursors.orgId, orgId));
+      const covered = await tx
+        .select({ connectionId: orders.storeConnectionId, from: min(orders.placedAt) })
+        .from(orders)
+        .where(eq(orders.orgId, orgId))
+        .groupBy(orders.storeConnectionId);
+      const byConn = new Map<string, typeof cursors>();
+      for (const c of cursors) {
+        const list = byConn.get(c.connectionId) ?? [];
+        list.push(c);
+        byConn.set(c.connectionId, list);
+      }
+      const coveredBy = new Map(covered.map((c) => [c.connectionId, c.from]));
       return rows.map((r) => ({
         id: r.id,
         platform: r.platform,
@@ -304,8 +338,118 @@ export class ConnectionsService {
         status: r.status,
         lastSyncedAt: r.lastSyncedAt?.toISOString() ?? null,
         lastError: r.lastError,
+        sync: this.summarize(r, byConn.get(r.id) ?? [], coveredBy.get(r.id) ?? null),
       }));
     });
+  }
+
+  private summarize(
+    conn: { status: string; scopes: string[] | null },
+    cursors: {
+      resource: string;
+      status: string;
+      recordsProcessed: number;
+      lastError: string | null;
+    }[],
+    coveredFrom: Date | null,
+  ): ConnectionSyncDto {
+    const ordered = SYNC_RESOURCE_ORDER.flatMap((r) => cursors.filter((c) => c.resource === r));
+    const running = ordered.find((c) => c.status === 'running');
+    const failed = ordered.find((c) => c.status === 'failed');
+    const allComplete = SYNC_RESOURCE_ORDER.every((r) =>
+      cursors.some((c) => c.resource === r && c.status === 'complete'),
+    );
+    const base = {
+      coveredFrom: coveredFrom?.toISOString() ?? null,
+      historyLimited: !(conn.scopes ?? []).includes('read_all_orders'),
+      canStart: this.syncQueue.available && (conn.status === 'active' || conn.status === 'error'),
+    };
+    if (running) {
+      return {
+        ...base,
+        state: 'running',
+        resource: running.resource,
+        recordsProcessed: running.recordsProcessed,
+        error: null,
+      };
+    }
+    if (failed) {
+      return {
+        ...base,
+        state: 'failed',
+        resource: failed.resource,
+        recordsProcessed: failed.recordsProcessed,
+        error: failed.lastError,
+      };
+    }
+    return {
+      ...base,
+      state: allComplete ? 'idle' : 'never',
+      resource: null,
+      recordsProcessed: 0,
+      error: null,
+    };
+  }
+
+  /** Starts a backfill (never fully synced) or an incremental sync. `started: false` means one is already running. */
+  async syncNow(orgId: string, userId: string, id: string): Promise<SyncNowResponse> {
+    const conn = await this.db.withTenant(orgId, async (tx) => {
+      const rows = await tx
+        .select({ status: storeConnections.status, scopes: storeConnections.scopes })
+        .from(storeConnections)
+        .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, id)));
+      const row = rows[0];
+      if (!row) return null;
+      const done = await tx
+        .select({ resource: syncCursors.resource })
+        .from(syncCursors)
+        .where(
+          and(
+            eq(syncCursors.orgId, orgId),
+            eq(syncCursors.storeConnectionId, id),
+            sql`${syncCursors.lastSyncedAt} is not null`,
+          ),
+        );
+      const doneSet = new Set(done.map((d) => d.resource));
+      return { ...row, synced: SYNC_RESOURCE_ORDER.every((r) => doneSet.has(r)) };
+    });
+    if (!conn) throw new ApiError(404, 'connection_not_found', 'Connection not found');
+    if (conn.status !== 'active' && conn.status !== 'error') {
+      throw new ApiError(409, 'connection_not_active', 'Reconnect this store first.');
+    }
+    if (!this.syncQueue.available) {
+      throw new ApiError(
+        503,
+        'sync_not_available',
+        'Importing is not available on this server yet.',
+      );
+    }
+    const mode = conn.synced ? 'incremental' : 'backfill';
+    const result = await this.syncStarter.start({
+      orgId,
+      connectionId: id,
+      scopes: conn.scopes ?? [],
+      mode,
+    });
+    if (result === 'unavailable') {
+      throw new ApiError(
+        503,
+        'sync_not_available',
+        'Importing is not available on this server yet.',
+      );
+    }
+    if (result === 'already_running') return { started: false };
+    await this.db.withTenant(orgId, (tx) =>
+      insertAudit(tx, {
+        orgId,
+        actorUserId: userId,
+        action: 'connection.sync_requested',
+        entityType: 'store_connection',
+        entityId: id,
+        after: { mode },
+      }),
+    );
+    return { started: true };
   }
 
   async disconnect(orgId: string, userId: string, id: string): Promise<void> {

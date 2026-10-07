@@ -175,6 +175,15 @@ describe('GET /orgs/:orgId/connections and disconnect', () => {
         status: 'active',
         lastSyncedAt: null,
         lastError: 'boom',
+        sync: {
+          state: 'never',
+          resource: null,
+          recordsProcessed: 0,
+          coveredFrom: null,
+          historyLimited: true,
+          error: null,
+          canStart: true,
+        },
       },
     ]);
     expect(JSON.stringify(list.body)).not.toMatch(/ciphertext|credential|token/i);
@@ -892,5 +901,294 @@ describe('first backfill after connect', () => {
     for (const secret of ['shpat_unique_77aa', 'code-9f3a1c', state, 'test-secret', 'hmac']) {
       expect(payload).not.toContain(secret);
     }
+  });
+});
+
+describe('sync summary', () => {
+  beforeEach(() => syncQueue.reset());
+  const RESOURCES = ['locations', 'products', 'inventory', 'orders'] as const;
+  async function conn(
+    orgId: string,
+    over: { status?: string; scopes?: string[]; shop?: string } = {},
+  ) {
+    const { rows } = await owner.query(
+      `insert into store_connections (org_id, platform, external_account_id, status, scopes, encrypted_credentials)
+       values ($1, 'shopify', $2, $3, $4, 'ciphertext-secret') returning id`,
+      [
+        orgId,
+        over.shop ?? `s-${randomUUID().slice(0, 8)}.myshopify.com`,
+        over.status ?? 'active',
+        over.scopes ?? ['read_orders'],
+      ],
+    );
+    return rows[0].id as string;
+  }
+  const cursor = (
+    orgId: string,
+    id: string,
+    resource: string,
+    status: string,
+    extra: { records?: number; error?: string; synced?: boolean } = {},
+  ) =>
+    owner.query(
+      `insert into sync_cursors (org_id, store_connection_id, resource, status, records_processed, last_error, last_synced_at)
+       values ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        orgId,
+        id,
+        resource,
+        status,
+        extra.records ?? 0,
+        extra.error ?? null,
+        extra.synced ? new Date() : null,
+      ],
+    );
+  const summary = async (orgId: string, h: Record<string, string>, id: string) => {
+    const res = await request(server()).get(`/orgs/${orgId}/connections`).set(h);
+    expect(res.status).toBe(200);
+    return (res.body as { id: string; sync: Record<string, unknown> }[]).find((c) => c.id === id)!
+      .sync;
+  };
+
+  it('is never with no cursors, and reads historyLimited from the stored scopes', async () => {
+    const { orgId, h } = await createOrg('Sum Never');
+    const a = await conn(orgId, { scopes: ['read_orders'] });
+    const b = await conn(orgId, { scopes: ['read_orders', 'read_all_orders'] });
+    expect(await summary(orgId, h, a)).toEqual({
+      state: 'never',
+      resource: null,
+      recordsProcessed: 0,
+      coveredFrom: null,
+      historyLimited: true,
+      error: null,
+      canStart: true,
+    });
+    expect(await summary(orgId, h, b)).toMatchObject({ historyLimited: false });
+  });
+
+  it('shows the first running resource with its progress', async () => {
+    const { orgId, h } = await createOrg('Sum Running');
+    const id = await conn(orgId);
+    await cursor(orgId, id, 'products', 'complete', { synced: true });
+    await cursor(orgId, id, 'orders', 'running', { records: 1200 });
+    await cursor(orgId, id, 'inventory', 'failed', { error: 'ignored while running' });
+    expect(await summary(orgId, h, id)).toMatchObject({
+      state: 'running',
+      resource: 'orders',
+      recordsProcessed: 1200,
+      error: null,
+    });
+  });
+
+  it('shows a failed resource with its stored sanitized error', async () => {
+    const { orgId, h } = await createOrg('Sum Failed');
+    const id = await conn(orgId);
+    await cursor(orgId, id, 'locations', 'complete', { synced: true });
+    await cursor(orgId, id, 'products', 'failed', { error: 'Shopify said no', records: 7 });
+    expect(await summary(orgId, h, id)).toMatchObject({
+      state: 'failed',
+      resource: 'products',
+      error: 'Shopify said no',
+    });
+  });
+
+  it('is idle only when all four resources are complete; three of four is still never', async () => {
+    const { orgId, h } = await createOrg('Sum Idle');
+    const id = await conn(orgId);
+    for (const r of RESOURCES.slice(0, 3)) await cursor(orgId, id, r, 'complete', { synced: true });
+    expect(await summary(orgId, h, id)).toMatchObject({ state: 'never' });
+    await cursor(orgId, id, 'orders', 'complete', { synced: true });
+    expect(await summary(orgId, h, id)).toMatchObject({ state: 'idle', resource: null });
+  });
+
+  it('coveredFrom is the oldest placed_at of that connection only', async () => {
+    const { orgId, h } = await createOrg('Sum Covered');
+    const id = await conn(orgId);
+    const other = await conn(orgId);
+    const ins = (cid: string, ext: string, at: string) =>
+      owner.query(
+        `insert into orders (org_id, store_connection_id, external_order_id, channel, status, placed_at, currency,
+           gross_cents, discount_cents, shipping_charged_cents, tax_cents, refund_cents, net_cents, external_updated_at)
+         values ($1, $2, $3, 'shopify_online', 'open', $4, 'USD', 100, 0, 0, 0, 0, 100, now())`,
+        [orgId, cid, ext, at],
+      );
+    await ins(id, 'o1', '2026-03-05T10:00:00Z');
+    await ins(id, 'o2', '2026-02-01T08:30:00Z');
+    await ins(other, 'o3', '2025-01-01T00:00:00Z');
+    expect(await summary(orgId, h, id)).toMatchObject({ coveredFrom: '2026-02-01T08:30:00.000Z' });
+    expect(await summary(orgId, h, other)).toMatchObject({
+      coveredFrom: '2025-01-01T00:00:00.000Z',
+    });
+  });
+
+  it('canStart is false for unusable connections and when no queue is configured', async () => {
+    const { orgId, h } = await createOrg('Sum CanStart');
+    const dis = await conn(orgId, { status: 'disconnected' });
+    const err = await conn(orgId, { status: 'error' });
+    expect(await summary(orgId, h, dis)).toMatchObject({ canStart: false });
+    expect(await summary(orgId, h, err)).toMatchObject({ canStart: true });
+    syncQueue.available = false;
+    expect(await summary(orgId, h, err)).toMatchObject({ canStart: false });
+  });
+
+  it('never leaks another org summary, credentials or ciphertext', async () => {
+    const a = await createOrg('Sum Iso A');
+    const b = await createOrg('Sum Iso B');
+    const id = await conn(a.orgId);
+    await cursor(a.orgId, id, 'orders', 'running', { records: 5 });
+    const res = await request(server()).get(`/orgs/${b.orgId}/connections`).set(b.h);
+    expect(res.body).toEqual([]);
+    const own = await request(server()).get(`/orgs/${a.orgId}/connections`).set(a.h);
+    expect(JSON.stringify(own.body)).not.toMatch(/ciphertext|secret|credential|token/i);
+  });
+
+  it('uses a bounded number of tenant transactions however many connections exist', async () => {
+    const { orgId, h } = await createOrg('Sum Bounded');
+    for (let i = 0; i < 6; i++) {
+      const id = await conn(orgId);
+      await cursor(orgId, id, 'orders', 'complete', { synced: true });
+    }
+    const db = t.app.get(TENANT_DB) as { withTenant: (...a: never[]) => unknown };
+    const calls = vi.fn();
+    const orig = db.withTenant.bind(db);
+    db.withTenant = ((...a: never[]) => {
+      calls();
+      return orig(...a);
+    }) as never;
+    try {
+      const res = await request(server()).get(`/orgs/${orgId}/connections`).set(h);
+      expect(res.body).toHaveLength(6);
+      expect(calls.mock.calls.length).toBeLessThanOrEqual(2); // never one per connection
+    } finally {
+      db.withTenant = orig as never;
+    }
+  });
+});
+
+describe('sync now', () => {
+  beforeEach(() => syncQueue.reset());
+  async function conn(orgId: string, status = 'active') {
+    const { rows } = await owner.query(
+      `insert into store_connections (org_id, platform, external_account_id, status, scopes)
+       values ($1, 'shopify', $2, $3, array['read_orders']) returning id`,
+      [orgId, `n-${randomUUID().slice(0, 8)}.myshopify.com`, status],
+    );
+    return rows[0].id as string;
+  }
+  const post = (orgId: string, id: string, h: Record<string, string>) =>
+    request(server()).post(`/orgs/${orgId}/connections/${id}/sync`).set(h);
+  const audit = (orgId: string, id: string) =>
+    owner.query(
+      `select actor_user_id, after_json from audit_log where org_id = $1 and entity_id = $2 and action = 'connection.sync_requested'`,
+      [orgId, id],
+    );
+
+  it('starts a backfill on a never-synced connection, audits it, and refuses a duplicate while running', async () => {
+    const { orgId, user, h } = await createOrg('Sync Backfill');
+    const id = await conn(orgId);
+    const res = await post(orgId, id, h);
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ started: true });
+    expect(syncQueue.jobs).toHaveLength(1);
+    expect(syncQueue.jobs[0]).toMatchObject({
+      orgId,
+      resource: 'locations',
+      then: { resources: ['products', 'inventory', 'orders'], mode: 'backfill' },
+    });
+    expect(syncQueue.jobs[0]!.then!.since).toBeTruthy();
+    expect((await audit(orgId, id)).rows).toEqual([
+      { actor_user_id: user, after_json: { mode: 'backfill' } },
+    ]);
+    const again = await post(orgId, id, h);
+    expect(again.status).toBe(201);
+    expect(again.body).toEqual({ started: false });
+    expect(syncQueue.jobs).toHaveLength(1);
+  });
+
+  it('runs incremental (no since) once all four resources have completed', async () => {
+    const { orgId, user, h } = await createOrg('Sync Incremental');
+    const id = await conn(orgId);
+    for (const r of ['locations', 'products', 'inventory', 'orders']) {
+      await owner.query(
+        `insert into sync_cursors (org_id, store_connection_id, resource, status, last_synced_at)
+         values ($1, $2, $3, 'complete', now())`,
+        [orgId, id, r],
+      );
+    }
+    const res = await post(orgId, id, h);
+    expect(res.body).toEqual({ started: true });
+    expect(syncQueue.jobs).toHaveLength(1);
+    expect(syncQueue.jobs[0]!.then).toMatchObject({ mode: 'incremental' });
+    expect(syncQueue.jobs[0]!.then!.since ?? null).toBeNull();
+    expect((await audit(orgId, id)).rows).toEqual([
+      { actor_user_id: user, after_json: { mode: 'incremental' } },
+    ]);
+  });
+
+  it('can recover an error-status connection', async () => {
+    const { orgId, h } = await createOrg('Sync Recover');
+    const id = await conn(orgId, 'error');
+    expect((await post(orgId, id, h)).body).toEqual({ started: true });
+  });
+
+  it('is admin only: viewers and analysts get 403 and nothing starts', async () => {
+    const { orgId } = await createOrg('Sync Roles');
+    const id = await conn(orgId);
+    for (const role of ['viewer', 'analyst'] as const) {
+      const res = await post(orgId, id, await addMember(orgId, role));
+      expect(res.status).toBe(403);
+    }
+    expect(syncQueue.jobs).toHaveLength(0);
+    expect((await audit(orgId, id)).rowCount).toBe(0);
+  });
+
+  it('answers 404 for unknown ids and other orgs, 400 for malformed ids, and starts nothing', async () => {
+    const a = await createOrg('Sync Own');
+    const b = await createOrg('Sync Other');
+    const foreign = await conn(b.orgId);
+    const unknown = await post(a.orgId, randomUUID(), a.h);
+    expect(unknown.status).toBe(404);
+    expect(unknown.body.error.code).toBe('connection_not_found');
+    expect((await post(a.orgId, foreign, a.h)).status).toBe(404);
+    expect((await post(a.orgId, 'not-a-uuid', a.h)).status).toBe(400);
+    expect(syncQueue.jobs).toHaveLength(0);
+  });
+
+  it('answers 409 connection_not_active for disconnected, pending and demo connections', async () => {
+    const { orgId, h } = await createOrg('Sync Inactive');
+    for (const status of ['disconnected', 'pending', 'demo']) {
+      const res = await post(orgId, await conn(orgId, status), h);
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatchObject({
+        code: 'connection_not_active',
+        message: 'Reconnect this store first.',
+      });
+    }
+    expect(syncQueue.jobs).toHaveLength(0);
+  });
+
+  it('answers 503 sync_not_available when no queue is configured', async () => {
+    const { orgId, h } = await createOrg('Sync NoQueue');
+    const id = await conn(orgId);
+    syncQueue.available = false;
+    const res = await post(orgId, id, h);
+    expect(res.status).toBe(503);
+    expect(res.body.error).toMatchObject({
+      code: 'sync_not_available',
+      message: 'Importing is not available on this server yet.',
+    });
+    expect((await audit(orgId, id)).rowCount).toBe(0);
+  });
+
+  it('leaves no running cursor when the queue fails, and a retry then works', async () => {
+    const { orgId, h } = await createOrg('Sync QueueDown');
+    const id = await conn(orgId);
+    syncQueue.fail = true;
+    const res = await post(orgId, id, h);
+    expect(res.status).toBeGreaterThanOrEqual(500);
+    const cursors = await owner.query(`select status from sync_cursors where org_id = $1`, [orgId]);
+    expect(cursors.rows.every((r) => r.status !== 'running')).toBe(true);
+    syncQueue.fail = false;
+    expect((await post(orgId, id, h)).body).toEqual({ started: true });
   });
 });

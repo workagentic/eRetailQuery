@@ -6,6 +6,7 @@ import {
   type ConnectionDto,
   type InstallResponse,
   type InstallShopifyInput,
+  type SyncNowResponse,
 } from '@erq/shared';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentOrg, CurrentUser, Roles } from '../auth/decorators';
@@ -49,5 +50,16 @@ export class ConnectionsController {
   ): Promise<{ ok: true }> {
     await this.connections.disconnect(org.orgId, user.userId, id);
     return { ok: true };
+  }
+
+  @Post('orgs/:orgId/connections/:id/sync')
+  @Roles('admin')
+  @UseGuards(AuthGuard, OrgGuard, RolesGuard)
+  sync(
+    @CurrentOrg() org: OrgContext,
+    @CurrentUser() user: VerifiedUser,
+    @Param('id', new ZodValidationPipe(uuidSchema)) id: string,
+  ): Promise<SyncNowResponse> {
+    return this.connections.syncNow(org.orgId, user.userId, id);
   }
 }

@@ -30,6 +30,25 @@ export const productsQueryCost = (productsFirst: number, variantsFirst: number):
 export const inventoryQueryCost = (itemsFirst: number, levelsFirst: number): number =>
   itemsFirst * (2 + levelsFirst * 6);
 
+/**
+ * Requested cost of an orders query, counting every object (a money set is 2) and 1 for each
+ * connection's pageInfo. Mirrors https://shopify.dev/docs/api/usage/limits#cost-calculation.
+ */
+export const ordersQueryCost = (
+  ordersFirst: number,
+  linesFirst: number,
+  refundsFirst: number,
+  refundLinesFirst: number,
+  shippingFirst: number,
+): number => {
+  const lines = 3 + linesFirst * 6;
+  const refund = 3 + (3 + refundLinesFirst * 4) + (3 + shippingFirst * 3);
+  return 3 + ordersFirst * (1 + 6 + lines + refundsFirst * refund);
+};
+
+/** Requested cost of the follow-up order lines query: connection 3 plus 6 per line, plus the order. */
+export const orderLinesQueryCost = (linesFirst: number): number => 1 + 3 + linesFirst * 6;
+
 export const gqlOk = (data: unknown, cost: CostOpts = {}): unknown => ({
   data,
   extensions: costExtension(cost),

@@ -20,6 +20,19 @@ export const VARIANTS_PAGE_SIZE = 50;
 export const INVENTORY_ITEMS_PAGE_SIZE = 10;
 export const INVENTORY_LEVELS_INLINE = 10;
 export const INVENTORY_LEVELS_EXTRA_PAGE_SIZE = 50;
+// Orders cost cap. Requested cost counts every object (a money set is 2: the bag and shopMoney),
+// a connection is 2 plus its nodes plus 1 for pageInfo. Per order: 1 + 3 money sets (6) + lines
+// (3 + 6 per line: line, variant, 2 money sets) + refunds; per refund: 1 + 2 + refund lines
+// (3 + 4 per line: line, lineItem, subtotal) + shipping lines (3 + 3 per line).
+// 3 * (7 + 63 + 6 * 35) + 3 = 843, under 1000. Refunds are requested one beyond the supported
+// count so an overflow is detected instead of silently truncated. A test guards the arithmetic.
+// https://shopify.dev/docs/api/usage/limits#cost-calculation
+export const ORDERS_PAGE_SIZE = 3;
+export const ORDER_LINES_INLINE = 10;
+export const ORDER_LINES_EXTRA_PAGE_SIZE = 100;
+export const ORDER_REFUNDS_INLINE = 5;
+export const REFUND_LINES_INLINE = 5;
+export const REFUND_SHIPPING_INLINE = 2;
 /**
  * Extra variant pages fetched for one product before the import fails loudly. Per-job ceiling:
  * one products page can issue up to PRODUCTS_PAGE_SIZE * MAX_EXTRA_PAGES extra variant queries.

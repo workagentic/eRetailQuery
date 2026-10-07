@@ -13,9 +13,9 @@ export const LOCATIONS_PAGE_SIZE = 100;
 // https://shopify.dev/docs/api/usage/limits#cost-calculation
 export const PRODUCTS_PAGE_SIZE = 8;
 export const VARIANTS_PAGE_SIZE = 50;
-// Inventory cost cap: per level ~1 (level) + 1 (location) + 4 (quantities) = 6 points; per item
-// 1 (item) + 1 (variant) + levels * 6. So items * (2 + levels * 6) must stay under 1000:
-// 10 * (2 + 10 * 6) = 620. The follow-up ErqInventoryLevels query is one item: 50 * 6 = 300.
+// Inventory cost cap: per level ~1 (level) + 1 (location) + 3 (quantity names) = 5 points; per item
+// 1 (item) + 1 (variant) + levels * 5. So items * (2 + levels * 5) must stay under 1000:
+// 10 * (2 + 10 * 5) = 520. The follow-up ErqInventoryLevels query is one item: 3 + 50 * 5 = 253.
 // https://shopify.dev/docs/api/usage/limits#cost-calculation
 export const INVENTORY_ITEMS_PAGE_SIZE = 10;
 export const INVENTORY_LEVELS_INLINE = 10;

@@ -208,7 +208,9 @@ export function runConnectorContract(subject: ContractSubject): void {
         expect(ids.size).toBeGreaterThan(0);
       });
     }
-    for (const resource of ['products', 'inventory', 'orders'] as const) {
+    // Inventory is left out: a connector may answer an incremental inventory request with a full
+    // pass (Shopify does, because its updated_at filter misses quantity-only changes).
+    for (const resource of ['products', 'orders'] as const) {
       it(`${resource}: an updatedSince in the future returns nothing`, async () => {
         const { connector, ctx } = subject.create();
         const page = await connector.fetchPage(ctx, resource, null, {

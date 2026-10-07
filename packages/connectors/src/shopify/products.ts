@@ -5,7 +5,7 @@
 // https://shopify.dev/docs/api/admin-graphql/latest/objects/InventoryItem  (unitCost: MoneyV2)
 // https://shopify.dev/docs/api/admin-graphql/latest/objects/Shop  (currencyCode)
 import { z } from 'zod';
-import { PermanentError } from '../errors';
+import { PermanentError, TransientError } from '../errors';
 import type { NormalizedProduct, NormalizedVariant, ProductStatus } from '../normalized';
 import type { FetchOptions, Page } from '../types';
 import {
@@ -97,6 +97,7 @@ const STATUS: Record<string, ProductStatus> = {
 };
 
 const UNEXPECTED = 'Shopify returned an unexpected response.';
+const RACE = 'Shopify data changed while it was being read. Retrying.';
 const orNull = (s: string | null): string | null => {
   const t = s === null ? '' : s.trim();
   return t === '' ? null : t;
@@ -105,6 +106,21 @@ function parseDate(s: string): Date {
   const d = new Date(s);
   if (Number.isNaN(d.getTime())) throw new PermanentError(UNEXPECTED);
   return d;
+}
+
+/**
+ * One currency per org: a cost in any other currency is ignored, never converted. A zero cost is
+ * "not entered" in Shopify, not a free product: it becomes null, because the cost import never
+ * overwrites an existing cost (a stored 0 would block the real cost later) and a 0 would hide the
+ * "add your costs" prompt.
+ */
+function unitCostOf(
+  cost: { amount: string; currencyCode: string } | null,
+  shopCurrency: string,
+): number | null {
+  if (cost === null || cost.currencyCode !== shopCurrency) return null;
+  const cents = parseMoneyToMinorUnits(cost.amount, shopCurrency);
+  return cents === 0 ? null : cents;
 }
 
 export function normalizeVariant(
@@ -122,11 +138,7 @@ export function normalizeVariant(
         ? null
         : parseMoneyToMinorUnits(node.compareAtPrice, shopCurrency),
     currency: shopCurrency,
-    // One currency per org: a cost in any other currency is ignored, never converted.
-    unitCostCents:
-      cost !== null && cost.currencyCode === shopCurrency
-        ? parseMoneyToMinorUnits(cost.amount, shopCurrency)
-        : null,
+    unitCostCents: unitCostOf(cost, shopCurrency),
     updatedAt: parseDate(node.updatedAt),
   };
 }
@@ -181,7 +193,8 @@ export async function fetchProducts(
         after: info.endCursor,
       });
       cost += res.cost;
-      if (res.data.product === null) throw new PermanentError(UNEXPECTED);
+      // The product can vanish between the two queries; retry the page instead of failing for good.
+      if (res.data.product === null) throw new TransientError(RACE);
       variantNodes.push(...res.data.product.variants.nodes);
       info = res.data.product.variants.pageInfo;
       extra += 1;

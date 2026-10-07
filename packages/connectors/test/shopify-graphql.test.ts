@@ -1,6 +1,6 @@
 // packages/connectors/test/shopify-graphql.test.ts
 import { z } from 'zod';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   AuthError,
   createShopifyGraphqlClient,
@@ -19,8 +19,13 @@ const ctx = {
   externalAccountId: 'a.myshopify.com',
   credentials: { accessToken: 'shpat_secret_token_value' },
 };
-const clientFor = (admin: FakeShopifyAdmin, apiVersion?: string) =>
-  createShopifyGraphqlClient({ http: admin, apiVersion });
+/** Records every in-place throttle wait instead of really waiting. */
+const recorder = () => {
+  const waits: number[] = [];
+  return { waits, sleep: async (ms: number) => void waits.push(ms) };
+};
+const clientFor = (admin: FakeShopifyAdmin, apiVersion?: string, sleep = recorder().sleep) =>
+  createShopifyGraphqlClient({ http: admin, apiVersion, sleep });
 
 describe('createShopifyGraphqlClient', () => {
   it('posts the documented request and returns parsed data with the actual query cost', async () => {
@@ -167,6 +172,83 @@ describe('createShopifyGraphqlClient', () => {
       .query(ctx, op, { secretVariable: 'zzz' })
       .catch((e) => e);
     expect(err.message).not.toMatch(/shpat_|Ping|zzz|shop \{/);
+  });
+});
+
+describe('in-place throttle retries', () => {
+  it('waits out a THROTTLED response and retries the same query, returning its data', async () => {
+    const rec = recorder();
+    const admin = new FakeShopifyAdmin().on('Ping', (_v, i) =>
+      i === 0
+        ? gqlThrottled({ requested: 600, available: 100, restoreRate: 50 })
+        : gqlOk({ shop: { name: 'Acme' } }, { actual: 42 }),
+    );
+    const res = await clientFor(admin, undefined, rec.sleep).query(ctx, op, { x: 1 });
+    expect(res).toEqual({ data: { shop: { name: 'Acme' } }, cost: 42 });
+    expect(rec.waits).toEqual([10_000]);
+    expect(admin.requests).toHaveLength(2);
+    expect(admin.requests[1]!.body).toBe(admin.requests[0]!.body);
+  });
+  it('gives up after 5 in-place retries and throws the clamped delay', async () => {
+    const rec = recorder();
+    const admin = new FakeShopifyAdmin().on('Ping', () =>
+      gqlThrottled({ requested: 101, available: 100, restoreRate: 50 }),
+    );
+    const err = await clientFor(admin, undefined, rec.sleep)
+      .query(ctx, op, {})
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitedError);
+    expect((err as RateLimitedError).retryAfterMs).toBe(500);
+    expect(rec.waits).toEqual([500, 500, 500, 500, 500]);
+    expect(admin.requests).toHaveLength(6);
+  });
+  it('never waits more than 60 s in total inside one query', async () => {
+    const rec = recorder();
+    const admin = new FakeShopifyAdmin().on('Ping', () =>
+      gqlThrottled({ requested: 1600, available: 100, restoreRate: 50 }),
+    );
+    const err = await clientFor(admin, undefined, rec.sleep)
+      .query(ctx, op, {})
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitedError);
+    expect((err as RateLimitedError).retryAfterMs).toBe(30_000);
+    expect(rec.waits).toEqual([30_000, 30_000]);
+    expect(admin.requests).toHaveLength(3);
+  });
+  it('does not retry an HTTP 429 in place', async () => {
+    const rec = recorder();
+    const admin = new FakeShopifyAdmin().on('Ping', () => gqlOk({ shop: { name: 'Acme' } }));
+    admin.failNext(429, { 'retry-after': '1' });
+    const err = await clientFor(admin, undefined, rec.sleep)
+      .query(ctx, op, {})
+      .catch((e) => e);
+    expect(err).toBeInstanceOf(RateLimitedError);
+    expect(rec.waits).toEqual([]);
+    expect(admin.requests).toHaveLength(1);
+  });
+  it('sleeps on a real timer by default', async () => {
+    vi.useFakeTimers();
+    try {
+      const admin = new FakeShopifyAdmin().on('Ping', (_v, i) =>
+        i === 0
+          ? gqlThrottled({ requested: 101, available: 100, restoreRate: 50 })
+          : gqlOk({ shop: { name: 'Acme' } }),
+      );
+      let settled = false;
+      const pending = createShopifyGraphqlClient({ http: admin })
+        .query(ctx, op, {})
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(499);
+      expect(settled).toBe(false);
+      expect(admin.requests).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(pending).resolves.toMatchObject({ data: { shop: { name: 'Acme' } } });
+      expect(admin.requests).toHaveLength(2);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 

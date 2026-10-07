@@ -250,10 +250,15 @@ export function normalizeOrder(
   }
 
   const refunds: NormalizedRefund[] = node.refunds.map((r) => {
+    // Defensive: fetchOrders completes every refund connection first (completeRefunds), so this is
+    // unreachable from there; it is kept for direct callers of normalizeOrder.
     if (r.refundLineItems.pageInfo.hasNextPage || r.refundShippingLines.pageInfo.hasNextPage) {
       throw new PermanentError(TOO_MANY_REFUND_LINES);
     }
-    const refundLines: NormalizedRefund['lines'] = [];
+    // One row per order line per refund: Shopify can return several refund lines for one line item
+    // (for example a restock split across two locations), and the sink's multi-row upsert must
+    // never see the same (refund, line) twice, so quantities and amounts are summed here.
+    const byLine = new Map<string, NormalizedRefund['lines'][number]>();
     let restock = false;
     for (const rl of r.refundLineItems.nodes) {
       const quantity = nonNegativeInt(rl.quantity);
@@ -261,8 +266,15 @@ export function normalizeOrder(
       if (quantity === 0) continue;
       // An unrecognised restock type counts as a restock; only an explicit NO_RESTOCK does not.
       if (rl.restockType !== 'NO_RESTOCK') restock = true;
-      refundLines.push({ externalLineId: rl.lineItem.id, quantity, amountCents });
+      const existing = byLine.get(rl.lineItem.id);
+      if (existing) {
+        existing.quantity += quantity;
+        existing.amountCents += amountCents;
+      } else {
+        byLine.set(rl.lineItem.id, { externalLineId: rl.lineItem.id, quantity, amountCents });
+      }
     }
+    const refundLines = [...byLine.values()];
     const shippingRefundCents = r.refundShippingLines.nodes.reduce(
       (sum, s) => sum + money(s.subtotalAmountSet),
       0,

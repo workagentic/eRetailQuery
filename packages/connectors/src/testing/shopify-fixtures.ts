@@ -23,6 +23,7 @@ import type { ConnectionContext } from '../types';
 import {
   FakeShopifyAdmin,
   gqlOk,
+  inventoryLevelsQueryCost,
   inventoryQueryCost,
   ordersQueryCost,
   paginate,
@@ -140,14 +141,13 @@ const PRODUCT_ROWS = [
 const level = (
   location: number,
   updatedAt: string,
-  q: { onHand: number; committed?: number; reserved?: number; incoming?: number },
+  q: { onHand: number; available?: number; incoming?: number },
 ) => ({
   updatedAt,
   location: { id: gid('Location', location) },
   quantities: [
     { name: 'on_hand', quantity: q.onHand },
-    { name: 'committed', quantity: q.committed ?? 0 },
-    { name: 'reserved', quantity: q.reserved ?? 0 },
+    { name: 'available', quantity: q.available ?? q.onHand },
     { name: 'incoming', quantity: q.incoming ?? 0 },
   ],
 });
@@ -158,7 +158,8 @@ const INVENTORY_ROWS = [
     variantId: gid('ProductVariant', 1001),
     updatedAt: '2026-02-10T09:00:00Z',
     levels: [
-      level(1, '2026-02-10T09:00:00Z', { onHand: 20, committed: 3, reserved: 2, incoming: 4 }),
+      // 20 on hand, 15 sellable: 5 are committed, reserved, damaged or otherwise held.
+      level(1, '2026-02-10T09:00:00Z', { onHand: 20, available: 15, incoming: 4 }),
       level(2, '2026-02-10T09:00:00Z', { onHand: 5 }),
     ],
   },
@@ -711,7 +712,7 @@ export function createShopifyFixture(opts: { extraOrders?: number } = {}): Shopi
       {
         inventoryItem: row ? { inventoryLevels: paginate(row.levels, first, str(v.after)) } : null,
       },
-      { requested: 3 + first * 6 },
+      { requested: inventoryLevelsQueryCost(first) },
     );
   });
 

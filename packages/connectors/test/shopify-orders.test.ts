@@ -302,6 +302,58 @@ describe('orders', () => {
     expect(d!.amountCents).toBe(500);
   });
 
+  it('sums refund lines that name the same order line (restocks at two locations)', async () => {
+    const page = await fetchOne(
+      order(1, {
+        lines: [line(1, 3, '19.99'), line(2, 3, '5.00')],
+        refunds: [
+          refund(
+            1,
+            [
+              refundLine(1, 1, '19.99'),
+              refundLine(2, 1, '5.00'),
+              refundLine(1, 2, '39.98', 'NO_RESTOCK'),
+            ],
+            '64.97',
+          ),
+          // A different refund for the same line stays its own row: aggregation is per refund.
+          refund(2, [refundLine(1, 0, '0.00'), refundLine(2, 1, '5.00')], '5.00'),
+        ],
+      }),
+    );
+    const [a, b] = page.items[0]!.refunds;
+    expect(a!.lines).toEqual([
+      { externalLineId: gid('LineItem', 1), quantity: 3, amountCents: 5997 },
+      { externalLineId: gid('LineItem', 2), quantity: 1, amountCents: 500 },
+    ]);
+    expect(a!.amountCents).toBe(6497);
+    expect(a!.restock).toBe(true);
+    expect(b!.lines).toEqual([
+      { externalLineId: gid('LineItem', 2), quantity: 1, amountCents: 500 },
+    ]);
+  });
+
+  it('sums repeated refund lines that arrive on a follow-up page', async () => {
+    const inlineLines = Array.from({ length: REFUND_LINES_INLINE }, (_, i) =>
+      refundLine(i + 1, 1, '2.00'),
+    );
+    // The follow-up page repeats line 1 (a second location) after the inline ones.
+    const lines = [...inlineLines, refundLine(1, 2, '4.00')];
+    const r = refund(1, lines, '14.00');
+    const admin = new FakeShopifyAdmin()
+      .on('ErqOrders', ordersHandler([order(1, { refunds: [r] })]))
+      .on('ErqRefundLines', refundConnHandler('refundLineItems', { [r.id]: lines }));
+    const out = (await fetchOrders(gqlOf(admin), ctx, null, {})).items[0]!.refunds[0]!;
+    expect(out.lines).toHaveLength(REFUND_LINES_INLINE);
+    expect(out.lines[0]).toEqual({
+      externalLineId: gid('LineItem', 1),
+      quantity: 3,
+      amountCents: 600,
+    });
+    expect(new Set(out.lines.map((l) => l.externalLineId)).size).toBe(out.lines.length);
+    expect(out.amountCents).toBe(1400);
+  });
+
   it('never lets a refund without lines go negative', () => {
     const node = order(1, { refunds: [refund(1, [], '1.00', ['2.00'])] });
     const o = normalizeOrder(node as never, node.lineItems.nodes as never);

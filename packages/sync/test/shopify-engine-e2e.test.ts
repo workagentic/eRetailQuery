@@ -64,10 +64,15 @@ function rewriting(inner: HttpClient, rewrite: Rewrite): HttpClient {
   };
 }
 
-async function setup(opts: { extraOrders?: number; rewrite?: Rewrite } = {}) {
+async function setup(
+  opts: { extraOrders?: number; rewrite?: Rewrite; sleep?: (ms: number) => Promise<void> } = {},
+) {
   const fixture = createShopifyFixture({ extraOrders: opts.extraOrders });
   const http = opts.rewrite ? rewriting(fixture.admin, opts.rewrite) : fixture.admin;
-  const connectors = new ConnectorRegistry().register('shopify', createShopifyConnector({ http }));
+  const connectors = new ConnectorRegistry().register(
+    'shopify',
+    createShopifyConnector({ http, sleep: opts.sleep }),
+  );
   const h = makeHarness(env, { connectors });
   await env.owner.query(
     `update store_connections set external_account_id = $2, encrypted_credentials = $3 where id = $1`,
@@ -267,15 +272,33 @@ describe('full Shopify backfill through the engine', () => {
 });
 
 describe('failure handling with Shopify', () => {
-  it('waits out a throttled orders page, then lands every order once', async () => {
-    const { h, fixture } = await setup();
+  it('waits out a throttled query in place, without re-running the page', async () => {
+    const waits: number[] = [];
+    const { h, fixture } = await setup({ sleep: async (ms) => void waits.push(ms) });
     await run(h, 'backfill', ['orders']);
     fixture.admin.respondNext({
       status: 200,
       body: JSON.stringify(gqlThrottled({ requested: 600, available: 100, restoreRate: 50 })),
     });
     const results = await drain(h);
-    expect(results[0]).toEqual({ kind: 'delayed', delayMs: 10_000 }); // (600 - 100) / 50 seconds
+    expect(waits).toEqual([10_000]); // (600 - 100) / 50 seconds
+    expect(results.some((r) => r.kind === 'delayed' || r.kind === 'failed')).toBe(false);
+    expect((await counts()).orders).toBe(fixture.expected.orders.length);
+  });
+
+  it('hands a page back to the queue when the throttle outlasts the in-place retries', async () => {
+    const waits: number[] = [];
+    const { h, fixture } = await setup({ sleep: async (ms) => void waits.push(ms) });
+    await run(h, 'backfill', ['orders']);
+    for (let i = 0; i < 6; i++) {
+      fixture.admin.respondNext({
+        status: 200,
+        body: JSON.stringify(gqlThrottled({ requested: 600, available: 100, restoreRate: 50 })),
+      });
+    }
+    const results = await drain(h);
+    expect(waits).toEqual([10_000, 10_000, 10_000, 10_000, 10_000]);
+    expect(results[0]).toEqual({ kind: 'delayed', delayMs: 10_000 });
     expect(results.at(-1)!.kind).toBe('done');
     expect((await counts()).orders).toBe(fixture.expected.orders.length);
     expect((await counts()).order_lines).toBe(
@@ -332,6 +355,42 @@ describe('failure handling with Shopify', () => {
 });
 
 describe('incremental sync after a backfill', () => {
+  it('refreshes a quantity-only stock change (item updated_at unchanged)', async () => {
+    let incremental = false;
+    const { h } = await setup({
+      rewrite(op, res) {
+        if (op !== 'ErqInventory' || !incremental) return res;
+        const body = JSON.parse(res.body);
+        const first = body.data.inventoryItems.nodes[0];
+        if (first?.id !== 'gid://shopify/InventoryItem/2001') return res;
+        // Only quantities moved; Shopify would not return this item to an updated_at filter.
+        first.inventoryLevels.nodes[0].quantities = [
+          { name: 'on_hand', quantity: 3 },
+          { name: 'available', quantity: 1 },
+          { name: 'incoming', quantity: 0 },
+        ];
+        return { ...res, body: JSON.stringify(body) };
+      },
+    });
+    await run(h);
+    await drain(h);
+    incremental = true;
+    h.clock.advance(86_400_000);
+    await run(h, 'incremental');
+    const results = await drain(h);
+    expect(results.some((r) => r.kind === 'failed')).toBe(false);
+    const level = (
+      await rows(
+        `select il.on_hand, il.reserved from inventory_levels il
+           join sku_channel_listings l on l.sku_id = il.sku_id
+           join locations loc on loc.id = il.location_id
+          where il.org_id = :org and l.external_variant_id = 'gid://shopify/ProductVariant/1001'
+            and loc.external_id = 'gid://shopify/Location/1'`,
+      )
+    )[0];
+    expect([Number(level.on_hand), Number(level.reserved)]).toEqual([3, 2]);
+  });
+
   it('asks Shopify only for rows updated since the watermark and replaces an updated order', async () => {
     let captured: { updatedAt: string; lineItems: { nodes: { quantity: number }[] } } | undefined;
     let incremental = false;
@@ -377,7 +436,9 @@ describe('incremental sync after a backfill', () => {
         .map((b) => b.variables.query);
     const watermark = `updated_at:>='${RUN_TIME}'`;
     expect(sent('ErqProducts')).toEqual([watermark]);
-    expect(sent('ErqInventory')).toEqual([watermark]);
+    // Inventory always takes a full pass: quantity-only changes do not move updated_at.
+    expect(sent('ErqInventory').length).toBeGreaterThan(0);
+    expect(sent('ErqInventory').every((q) => q === null)).toBe(true);
     expect(sent('ErqOrders')).toEqual([watermark]);
     expect(sent('ErqLocations')).toEqual([undefined]); // locations are always listed in full
 

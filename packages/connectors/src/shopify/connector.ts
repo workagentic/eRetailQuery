@@ -11,17 +11,14 @@ import type {
   ResourceItems,
   StoreConnector,
 } from '../types';
-import { createShopifyGraphqlClient } from './graphql';
-import type { HttpClient } from './http';
+import { createShopifyGraphqlClient, type ShopifyGraphqlClientOptions } from './graphql';
 import { fetchInventory } from './inventory';
 import { fetchLocations } from './locations';
 import { fetchOrders } from './orders';
 import { fetchProducts } from './products';
 
-export function createShopifyConnector(opts: {
-  http: HttpClient;
-  apiVersion?: string;
-}): StoreConnector {
+/** `sleep` (tests only) replaces the timer used to wait out a THROTTLED query in place. */
+export function createShopifyConnector(opts: ShopifyGraphqlClientOptions): StoreConnector {
   const gql = createShopifyGraphqlClient(opts);
   return {
     async connect(): Promise<Connection> {

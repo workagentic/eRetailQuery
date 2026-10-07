@@ -2,14 +2,14 @@ import { describe, expect, it } from 'vitest';
 import {
   createShopifyGraphqlClient,
   decodeCursor,
-  encodeCursor,
   fetchProducts,
   PermanentError,
   PRODUCTS_OP,
   PRODUCTS_PAGE_SIZE,
+  TransientError,
   VARIANTS_PAGE_SIZE,
 } from '../src';
-import { FakeShopifyAdmin, gqlOk, paginate, productsQueryCost } from '../src/testing';
+import { FakeShopifyAdmin, gqlOk, gqlThrottled, paginate, productsQueryCost } from '../src/testing';
 
 const ctx = { externalAccountId: 'a.myshopify.com', credentials: { accessToken: 'shpat_x' } };
 const variant = (n: number, over: Record<string, unknown> = {}) => ({
@@ -251,13 +251,15 @@ describe('products', () => {
     await expect(fetchProducts(gqlOf(admin), ctx, null, {})).rejects.toBeInstanceOf(PermanentError);
     expect(admin.callsOf('ErqProductVariants')).toBe(0);
   });
-  it('fails when the product disappears while its variants are fetched', async () => {
+  it('retries the page (transient) when the product disappears while its variants are fetched', async () => {
     const first = { nodes: [variant(1)], pageInfo: { hasNextPage: true, endCursor: '0' } };
     const items = [{ ...product(1, []), variants: first }];
     const admin = new FakeShopifyAdmin()
       .on('ErqProducts', productsHandler(items))
       .on('ErqProductVariants', () => gqlOk({ product: null }));
-    await expect(fetchProducts(gqlOf(admin), ctx, null, {})).rejects.toBeInstanceOf(PermanentError);
+    const err = await fetchProducts(gqlOf(admin), ctx, null, {}).catch((e) => e);
+    expect(err).toBeInstanceOf(TransientError);
+    expect(err.message).toBe('Shopify data changed while it was being read. Retrying.');
   });
   it('rejects a tampered cursor before calling Shopify', async () => {
     const admin = new FakeShopifyAdmin().on('ErqProducts', productsHandler([]));
@@ -265,6 +267,45 @@ describe('products', () => {
     expect(err).toBeInstanceOf(PermanentError);
     expect(err.message).toBe('Invalid sync cursor.');
     expect(admin.requests).toHaveLength(0);
-    expect(encodeCursor('x')).toBeTruthy();
+  });
+  it('waits out a throttle on a follow-up query in place and completes the page in one call', async () => {
+    const all = Array.from({ length: 250 }, (_, i) => variant(i + 1));
+    const items = [{ ...product(1, []), variants: paginate(all, 50, null) }];
+    const waits: number[] = [];
+    const admin = new FakeShopifyAdmin()
+      .on('ErqProducts', productsHandler(items))
+      .on('ErqProductVariants', (v, i) =>
+        i === 2
+          ? gqlThrottled({ requested: 200, available: 100, restoreRate: 50 })
+          : gqlOk({
+              product: {
+                variants: paginate(all, v.first as number, (v.after as string | null) ?? null),
+              },
+            }),
+      );
+    const gql = createShopifyGraphqlClient({
+      http: admin,
+      sleep: async (ms) => void waits.push(ms),
+    });
+    const page = await fetchProducts(gql, ctx, null, {});
+    expect(page.items[0]!.variants).toHaveLength(250);
+    expect(new Set(page.items[0]!.variants.map((x) => x.externalId)).size).toBe(250);
+    expect(waits).toEqual([2000]); // (200 - 100) / 50 s
+    // 4 follow-ups plus the one throttled attempt; the throttled response costs nothing here.
+    expect(admin.callsOf('ErqProductVariants')).toBe(5);
+    expect(page.cost).toBe(40 * 5);
+  });
+  it('treats a zero unit cost as no cost, so a later real cost can still be imported', async () => {
+    const items = [
+      product(1, [
+        variant(1, { inventoryItem: { unitCost: { amount: '0.00', currencyCode: 'USD' } } }),
+        variant(2, { inventoryItem: { unitCost: { amount: '0', currencyCode: 'USD' } } }),
+        variant(3, { inventoryItem: { unitCost: { amount: '-0.00', currencyCode: 'USD' } } }),
+        variant(4, { inventoryItem: { unitCost: { amount: '0.01', currencyCode: 'USD' } } }),
+      ]),
+    ];
+    const admin = new FakeShopifyAdmin().on('ErqProducts', productsHandler(items));
+    const page = await fetchProducts(gqlOf(admin), ctx, null, {});
+    expect(page.items[0]!.variants.map((x) => x.unitCostCents)).toEqual([null, null, null, 1]);
   });
 });

@@ -48,6 +48,9 @@ describe('createShopifyConnector', () => {
 
   it('pages orders across several requests, in order and without gaps', async () => {
     const extra = 70;
+    // Several pages need more orders than one page holds; 70 extra orders cover that only while the
+    // page stays small, so raising the page size must also raise `extra`.
+    expect(ORDERS_PAGE_SIZE).toBeLessThan(75);
     const { items, expected, pages } = await drain('orders', {}, extra);
     expect(items).toHaveLength(5 + extra);
     expect(pages).toBe(Math.ceil((5 + extra) / ORDERS_PAGE_SIZE));
@@ -58,17 +61,13 @@ describe('createShopifyConnector', () => {
     const since = { updatedSince: new Date('2026-02-15T00:00:00Z') };
     const products = await drain('products', since);
     expect(ids(products.items)).toEqual(['gid://shopify/Product/102', 'gid://shopify/Product/103']);
+    // Inventory ignores updatedSince and always reads every level (quantity-only changes do not
+    // move updated_at), so an incremental still refreshes stock.
     const inventory = await drain('inventory', since);
-    expect(inventory.items).toHaveLength(6);
+    expect(inventory.items).toEqual(inventory.expected.inventory);
     expect(
-      new Set((inventory.items as { externalVariantId: string }[]).map((l) => l.externalVariantId)),
-    ).toEqual(
-      new Set([
-        'gid://shopify/ProductVariant/1003',
-        'gid://shopify/ProductVariant/1004',
-        'gid://shopify/ProductVariant/1005',
-      ]),
-    );
+      inventory.admin.requests.map((r) => JSON.parse(r.body!).variables.query as unknown),
+    ).toEqual(inventory.admin.requests.map(() => null));
     const orders = await drain('orders', { updatedSince: new Date('2026-03-03T00:00:00Z') });
     expect(ids(orders.items)).toEqual([
       'gid://shopify/Order/3003',
@@ -112,6 +111,18 @@ describe('createShopifyConnector', () => {
       .fetchPage({ ...ctx, credentials: { nope: true } }, 'orders', null, {})
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AuthError);
+    expect(admin.requests).toHaveLength(0);
+  });
+
+  it('rejects an invalid shop domain as permanent for every resource without a request', async () => {
+    const { admin, ctx } = createShopifyFixture();
+    const connector = createShopifyConnector({ http: admin });
+    for (const resource of SYNC_RESOURCES) {
+      const err = await connector
+        .fetchPage({ ...ctx, externalAccountId: 'evil.com' }, resource, null, {})
+        .catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(PermanentError);
+    }
     expect(admin.requests).toHaveLength(0);
   });
 

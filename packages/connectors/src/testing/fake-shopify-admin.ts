@@ -1,5 +1,6 @@
 // packages/connectors/src/testing/fake-shopify-admin.ts
 import type { HttpClient, HttpRequest, HttpResponse } from '../shopify/http';
+import { INVENTORY_QUANTITY_NAMES } from '../shopify/inventory';
 
 type Handler = (variables: Record<string, unknown>, callIndex: number) => unknown;
 interface CostOpts {
@@ -26,9 +27,17 @@ const costExtension = (c: CostOpts) => ({
 export const productsQueryCost = (productsFirst: number, variantsFirst: number): number =>
   productsFirst * (1 + variantsFirst * 2);
 
-/** Requested cost of an inventory query: per item 2 (item + variant) plus 6 per level (level, location, 4 quantities). */
+/**
+ * Points per inventory level: the level, its location, and one per requested quantity name.
+ * Derived from INVENTORY_QUANTITY_NAMES so that adding a name raises every budget below.
+ */
+const levelCost = (): number => 2 + INVENTORY_QUANTITY_NAMES.length;
+/** Requested cost of an inventory query: per item 2 (item + variant) plus levelCost() per level. */
 export const inventoryQueryCost = (itemsFirst: number, levelsFirst: number): number =>
-  itemsFirst * (2 + levelsFirst * 6);
+  itemsFirst * (2 + levelsFirst * levelCost());
+/** Requested cost of the one-item follow-up levels query: item and connection 3, plus the levels. */
+export const inventoryLevelsQueryCost = (levelsFirst: number): number =>
+  3 + levelsFirst * levelCost();
 
 /**
  * Requested cost of an orders query, counting every object (a money set is 2) and 1 for each

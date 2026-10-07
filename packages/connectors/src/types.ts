@@ -33,7 +33,10 @@ export interface Page<T> {
 export interface FetchOptions {
   /** Backfill: only data from this date on. */
   since?: Date;
-  /** Incremental: only data changed since this date. */
+  /**
+   * Incremental: only data changed since this date. A connector may ignore it for a resource whose
+   * change filter is unreliable and return a full pass instead (Shopify inventory does, until 1b-3c).
+   */
   updatedSince?: Date;
 }
 export interface ConnectionContext {

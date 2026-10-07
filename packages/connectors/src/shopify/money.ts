@@ -21,6 +21,8 @@ const ZERO = new Set([
   'XOF',
   'XPF',
 ]);
+// Four-decimal units of account (CLF, UYW) are deliberately absent: they are not shop currencies,
+// and one would be treated as 2 decimals here.
 const THREE = new Set(['BHD', 'IQD', 'JOD', 'KWD', 'LYD', 'OMR', 'TND']);
 const UNREADABLE = 'Shopify returned an unreadable amount.';
 
@@ -33,7 +35,11 @@ export function minorUnitExponent(currency: string): number {
   return 2;
 }
 
-/** Exact decimal-string to minor-unit conversion. Never uses floating point. */
+/**
+ * Exact decimal-string to minor-unit conversion. Never uses floating point. Digits beyond the
+ * currency's minor unit are rounded (half away from zero, on the first dropped digit only), never
+ * rejected; a result that rounds to zero is 0, never -0.
+ */
 export function parseMoneyToMinorUnits(amount: string, currency: string): number {
   const match = /^(-?)(\d{1,15})(?:\.(\d+))?$/.exec(amount.trim());
   if (!match) throw new PermanentError(UNREADABLE);

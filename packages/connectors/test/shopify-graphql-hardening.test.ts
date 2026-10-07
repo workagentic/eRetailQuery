@@ -12,7 +12,9 @@ const ctx = {
   externalAccountId: 'a.myshopify.com',
   credentials: { accessToken: 'shpat_secret_token_value' },
 };
-const clientFor = (admin: FakeShopifyAdmin) => createShopifyGraphqlClient({ http: admin });
+// THROTTLED is retried in place; a no-op sleep keeps these tests from really waiting.
+const clientFor = (admin: FakeShopifyAdmin) =>
+  createShopifyGraphqlClient({ http: admin, sleep: async () => undefined });
 const run = (admin: FakeShopifyAdmin, variables: Record<string, unknown> = {}) =>
   clientFor(admin)
     .query(ctx, op, variables)
@@ -84,6 +86,12 @@ describe('createShopifyGraphqlClient hardening', () => {
     const req = admin.requests[0]!;
     expect(req.url).not.toContain('shpat_');
     expect(req.body).not.toContain('shpat_');
+    expect(req.headers?.['X-Shopify-Access-Token']).toBe('shpat_secret_token_value');
+    const others = Object.entries(req.headers ?? {}).filter(
+      ([name]) => name !== 'X-Shopify-Access-Token',
+    );
+    expect(others.length).toBeGreaterThan(0);
+    for (const [, value] of others) expect(value).not.toContain('shpat_secret_token_value');
     expect(req.headers?.['content-type']).toBe('application/json');
     expect(req.headers?.accept).toBe('application/json');
     const none = new FakeShopifyAdmin();

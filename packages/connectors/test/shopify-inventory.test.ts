@@ -4,12 +4,24 @@ import {
   decodeCursor,
   fetchInventory,
   INVENTORY_ITEMS_PAGE_SIZE,
+  INVENTORY_LEVELS_EXTRA_PAGE_SIZE,
   INVENTORY_LEVELS_INLINE,
+  INVENTORY_LEVELS_OP,
   INVENTORY_OP,
+  INVENTORY_QUANTITY_NAMES,
   normalizeInventoryLevel,
   PermanentError,
+  TransientError,
 } from '../src';
-import { FakeShopifyAdmin, gqlOk, inventoryQueryCost, paginate } from '../src/testing';
+import {
+  FakeShopifyAdmin,
+  gqlOk,
+  inventoryLevelsQueryCost,
+  inventoryQueryCost,
+  paginate,
+} from '../src/testing';
+
+const RACE = 'Shopify data changed while it was being read. Retrying.';
 
 const ctx = { externalAccountId: 'a.myshopify.com', credentials: { accessToken: 'shpat_x' } };
 const level = (
@@ -53,11 +65,14 @@ const levelsHandler = (all: unknown[]) => (v: Record<string, unknown>) =>
 const gqlOf = (admin: FakeShopifyAdmin) => createShopifyGraphqlClient({ http: admin });
 
 describe('inventory', () => {
-  it('maps quantities: reserved = committed + reserved, missing names are 0, negatives handled', async () => {
+  it('maps quantities: reserved = on_hand - available, clamped at 0; missing names are 0', async () => {
     const items = [
       item(1, [
-        level(1, { on_hand: 10, committed: 2, reserved: 1, incoming: 4 }),
-        level(2, { on_hand: -2, committed: -5, reserved: 2, incoming: -3 }),
+        // 3 units are committed, reserved, damaged, safety stock or in quality control.
+        level(1, { on_hand: 10, available: 7, incoming: 4 }),
+        // available above on_hand (bad data) never makes reserved negative.
+        level(2, { on_hand: -2, available: 5, incoming: -3 }),
+        // No available reported: nothing is treated as held.
         level(3, { on_hand: 7 }),
       ]),
     ];
@@ -77,7 +92,7 @@ describe('inventory', () => {
     expect(page.nextCursor).toBeNull();
   });
   it('ignores quantity names it does not know', () => {
-    const n = normalizeInventoryLevel('v', level(1, { available: 99 }));
+    const n = normalizeInventoryLevel('v', level(1, { committed: 99, damaged: 3 }));
     expect(n.onHand).toBe(5);
     expect(n.reserved).toBe(0);
   });
@@ -98,7 +113,7 @@ describe('inventory', () => {
     expect(second.items).toHaveLength(5);
     expect(second.nextCursor).toBeNull();
   });
-  it('sends the updated_at filter only for incrementals', async () => {
+  it('always reads every item: the updated_at filter misses quantity-only changes', async () => {
     const admin = new FakeShopifyAdmin().on('ErqInventory', handler([]));
     await fetchInventory(gqlOf(admin), ctx, null, {});
     await fetchInventory(gqlOf(admin), ctx, null, { since: new Date('2026-01-01T00:00:00Z') });
@@ -106,7 +121,7 @@ describe('inventory', () => {
       updatedSince: new Date('2026-02-03T04:05:06.000Z'),
     });
     const queries = admin.requests.map((r) => JSON.parse(r.body!).variables.query);
-    expect(queries).toEqual([null, null, "updated_at:>='2026-02-03T04:05:06.000Z'"]);
+    expect(queries).toEqual([null, null, null]);
   });
   it('fetches the remaining levels of an item with many locations', async () => {
     const all = Array.from({ length: 120 }, (_, i) => level(i + 1));
@@ -129,14 +144,26 @@ describe('inventory', () => {
     expect(err).toBeInstanceOf(PermanentError);
     expect(err.message).toBe('An inventory item has too many locations to import.');
   });
-  it('fails on a duplicate (variant, location) pair', async () => {
+  it('retries the page (transient) on a repeated (variant, location) pair', async () => {
     const admin = new FakeShopifyAdmin().on(
       'ErqInventory',
       handler([item(1, [level(1), level(1)])]),
     );
     const err = await fetchInventory(gqlOf(admin), ctx, null, {}).catch((e) => e);
-    expect(err).toBeInstanceOf(PermanentError);
-    expect(err.message).toBe('Shopify returned an unexpected response.');
+    expect(err).toBeInstanceOf(TransientError);
+    expect(err.message).toBe(RACE);
+  });
+  it('retries the page (transient) when a level repeats across follow-up pages', async () => {
+    const all = Array.from({ length: 12 }, (_, i) => level(i + 1));
+    // The follow-up starts over at the first level, as if a location was added between queries.
+    const admin = new FakeShopifyAdmin()
+      .on('ErqInventory', handler([item(1, all)]))
+      .on('ErqInventoryLevels', (v) =>
+        gqlOk({ inventoryItem: { inventoryLevels: paginate(all, v.first as number, null) } }),
+      );
+    const err = await fetchInventory(gqlOf(admin), ctx, null, {}).catch((e) => e);
+    expect(err).toBeInstanceOf(TransientError);
+    expect(err.message).toBe(RACE);
   });
   it('fails on an unreadable quantity', async () => {
     const admin = new FakeShopifyAdmin().on(
@@ -156,6 +183,19 @@ describe('inventory', () => {
       PermanentError,
     );
   });
+  it('requests exactly three quantity names, which the cost budget below is priced for', () => {
+    const names = [...INVENTORY_OP.document.matchAll(/quantities\(names: \[([^\]]*)\]\)/g)].map(
+      (m) => [...m[1]!.matchAll(/"([^"]+)"/g)].map((n) => n[1]),
+    );
+    expect(names).toEqual([['on_hand', 'available', 'incoming']]);
+    expect(INVENTORY_LEVELS_OP.document).toContain(
+      'quantities(names: ["on_hand", "available", "incoming"])',
+    );
+    expect([...INVENTORY_QUANTITY_NAMES]).toEqual(names[0]);
+    // Pinned: one more name raises each level to 6 points and this fails, forcing a budget review.
+    expect(inventoryQueryCost(INVENTORY_ITEMS_PAGE_SIZE, INVENTORY_LEVELS_INLINE)).toBe(520);
+    expect(inventoryLevelsQueryCost(INVENTORY_LEVELS_EXTRA_PAGE_SIZE)).toBe(253);
+  });
   it('keeps the inventory query under the 1000 point cost cap with the real constants', async () => {
     expect(INVENTORY_OP.document).toContain(`inventoryLevels(first: ${INVENTORY_LEVELS_INLINE})`);
     const admin = new FakeShopifyAdmin().on('ErqInventory', (v) => {
@@ -165,8 +205,8 @@ describe('inventory', () => {
     });
     await fetchInventory(gqlOf(admin), ctx, null, {});
     expect(JSON.parse(admin.requests[0]!.body!).variables.first).toBe(INVENTORY_ITEMS_PAGE_SIZE);
-    // The one-item follow-up query asks for 50 levels at 6 points each.
-    expect(inventoryQueryCost(1, 50)).toBeLessThan(1000);
+    // The one-item follow-up query asks for 50 levels.
+    expect(inventoryLevelsQueryCost(INVENTORY_LEVELS_EXTRA_PAGE_SIZE)).toBeLessThan(1000);
   });
   it('fails instead of looping when nested levels say hasNextPage without a cursor', async () => {
     const stuck = {
@@ -187,14 +227,14 @@ describe('inventory', () => {
       PermanentError,
     );
   });
-  it('fails when the item disappears while its levels are fetched', async () => {
+  it('retries the page (transient) when the item disappears while its levels are fetched', async () => {
     const all = Array.from({ length: 12 }, (_, i) => level(i + 1));
     const admin = new FakeShopifyAdmin()
       .on('ErqInventory', handler([item(1, all)]))
       .on('ErqInventoryLevels', () => gqlOk({ inventoryItem: null }));
-    await expect(fetchInventory(gqlOf(admin), ctx, null, {})).rejects.toBeInstanceOf(
-      PermanentError,
-    );
+    const err = await fetchInventory(gqlOf(admin), ctx, null, {}).catch((e) => e);
+    expect(err).toBeInstanceOf(TransientError);
+    expect(err.message).toBe(RACE);
   });
   it('rejects a tampered cursor before calling Shopify', async () => {
     const admin = new FakeShopifyAdmin().on('ErqInventory', handler([]));

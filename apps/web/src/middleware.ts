@@ -29,7 +29,10 @@ export async function middleware(request: NextRequest) {
     login.pathname = '/login';
     login.search = '';
     login.searchParams.set('next', path + request.nextUrl.search);
-    return NextResponse.redirect(login);
+    const redirect = NextResponse.redirect(login);
+    // The next param can carry a Shopify OAuth query; never let it leak through the Referer header.
+    redirect.headers.set('Referrer-Policy', 'no-referrer');
+    return redirect;
   }
   if (user && (path === '/login' || path === '/signup')) {
     const home = request.nextUrl.clone();

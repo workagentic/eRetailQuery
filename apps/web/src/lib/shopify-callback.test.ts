@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { safeNextPath } from './safe-next';
 import {
   connectionsPathFromApiRedirect,
   loginPathForCallback,
@@ -65,6 +66,19 @@ describe('loginPathForCallback', () => {
     expect(path.startsWith('/login?next=')).toBe(true);
     expect(decodeURIComponent(path.slice('/login?next='.length))).toBe(
       '/connections/shopify/callback?code=a%3D&hmac=ff',
+    );
+  });
+  it('survives the real encoding steps byte for byte (%3D%3D, +, %2F)', () => {
+    const search = '?code=a%3D%3D&host=YQ%3D%3D&q=a+b&path=x%2Fy&hmac=ff&timestamp=1';
+    // The login page reads `next` back through URLSearchParams and passes it to safeNextPath.
+    const loginUrl = new URL(loginPathForCallback(search), 'http://localhost:3000');
+    const afterLogin = safeNextPath(loginUrl.searchParams.get('next'));
+    expect(afterLogin).toBe(`/connections/shopify/callback${search}`);
+    // The middleware builds its own `next` with URLSearchParams.set; the same value must come back.
+    const viaMiddleware = new URL('http://localhost:3000/login');
+    viaMiddleware.searchParams.set('next', `/connections/shopify/callback${search}`);
+    expect(safeNextPath(new URL(viaMiddleware.toString()).searchParams.get('next'))).toBe(
+      `/connections/shopify/callback${search}`,
     );
   });
 });

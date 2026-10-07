@@ -101,8 +101,24 @@ export async function processWebhookEvent(
   const { topic, storeConnectionId } = claimed;
   try {
     if (topic === 'shop/redact') {
-      // The event row goes away with the connection (cascade), so there is nothing to mark afterwards.
-      await deps.connections.purgeStoreConnection(orgId, storeConnectionId);
+      const conn = await deps.db.withTenant(orgId, async (tx) => {
+        const rows = await tx
+          .select({
+            shop: storeConnections.externalAccountId,
+            platform: storeConnections.platform,
+          })
+          .from(storeConnections)
+          .where(
+            and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, storeConnectionId)),
+          );
+        return rows[0];
+      });
+      if (!conn) return 'processed'; // the connection (and with it this event) is already gone
+      // Purges every disconnected/errored connection of the shop in every org; an active reinstall is untouched.
+      await deps.connections.purgeShop(conn.platform, conn.shop);
+      // The cascade removed this event when its own connection was purged; if it was not (an active reinstall owns
+      // the shop), close the event normally. The update simply matches zero rows otherwise.
+      await deps.db.withTenant(orgId, (tx) => setStatus(tx, orgId, eventId, 'processed', now()));
       return 'processed';
     }
     return await deps.db.withTenant(orgId, async (tx) => {

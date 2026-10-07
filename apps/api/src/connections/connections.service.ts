@@ -362,7 +362,10 @@ export class ConnectionsService {
     const base = {
       coveredFrom: coveredFrom?.toISOString() ?? null,
       historyLimited: !(conn.scopes ?? []).includes('read_all_orders'),
-      canStart: this.syncQueue.available && (conn.status === 'active' || conn.status === 'error'),
+      canStart:
+        this.syncQueue.available &&
+        (conn.status === 'active' || conn.status === 'error') &&
+        !running,
     };
     if (running) {
       return {
@@ -401,17 +404,21 @@ export class ConnectionsService {
       const row = rows[0];
       if (!row) return null;
       const done = await tx
-        .select({ resource: syncCursors.resource })
+        .select({ resource: syncCursors.resource, status: syncCursors.status })
         .from(syncCursors)
         .where(
           and(
             eq(syncCursors.orgId, orgId),
             eq(syncCursors.storeConnectionId, id),
-            sql`${syncCursors.lastSyncedAt} is not null`,
+            sql`(${syncCursors.lastSyncedAt} is not null or ${syncCursors.status} = 'running')`,
           ),
         );
-      const doneSet = new Set(done.map((d) => d.resource));
-      return { ...row, synced: SYNC_RESOURCE_ORDER.every((r) => doneSet.has(r)) };
+      const doneSet = new Set(done.filter((d) => d.status !== 'running').map((d) => d.resource));
+      return {
+        ...row,
+        synced: SYNC_RESOURCE_ORDER.every((r) => doneSet.has(r)),
+        running: done.some((d) => d.status === 'running'),
+      };
     });
     if (!conn) throw new ApiError(404, 'connection_not_found', 'Connection not found');
     if (conn.status !== 'active' && conn.status !== 'error') {
@@ -424,13 +431,26 @@ export class ConnectionsService {
         'Importing is not available on this server yet.',
       );
     }
+    // enqueueSync only guards the first resource's cursor, so a chain past locations is checked here.
+    if (conn.running) return { started: false };
     const mode = conn.synced ? 'incremental' : 'backfill';
-    const result = await this.syncStarter.start({
-      orgId,
-      connectionId: id,
-      scopes: conn.scopes ?? [],
-      mode,
-    });
+    let result: Awaited<ReturnType<SyncStarter['start']>>;
+    try {
+      result = await this.syncStarter.start({
+        orgId,
+        connectionId: id,
+        scopes: conn.scopes ?? [],
+        mode,
+      });
+    } catch (err) {
+      // Only the start (queue) failing maps here; enqueueSync already failed the run and freed the cursor.
+      this.logger.warn({ err: sanitizeMessage(err) }, 'sync now could not be queued');
+      throw new ApiError(
+        503,
+        'sync_not_available',
+        'Could not start the sync. Try again in a moment.',
+      );
+    }
     if (result === 'unavailable') {
       throw new ApiError(
         503,

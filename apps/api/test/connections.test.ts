@@ -1180,12 +1180,37 @@ describe('sync now', () => {
     expect((await audit(orgId, id)).rowCount).toBe(0);
   });
 
+  it('does not start a second chain while any resource is still running', async () => {
+    const { orgId, h } = await createOrg('Sync PastLocations');
+    const id = await conn(orgId);
+    await owner.query(
+      `insert into sync_cursors (org_id, store_connection_id, resource, status, last_synced_at)
+       values ($1, $2, 'locations', 'complete', now()), ($1, $2, 'orders', 'running', null)`,
+      [orgId, id],
+    );
+    const res = await post(orgId, id, h);
+    expect(res.status).toBe(201);
+    expect(res.body).toEqual({ started: false });
+    expect(syncQueue.jobs).toHaveLength(0);
+    expect((await audit(orgId, id)).rowCount).toBe(0);
+    const list = await request(server()).get(`/orgs/${orgId}/connections`).set(h);
+    expect(list.body[0].sync).toMatchObject({ state: 'running', canStart: false });
+  });
+
   it('leaves no running cursor when the queue fails, and a retry then works', async () => {
     const { orgId, h } = await createOrg('Sync QueueDown');
     const id = await conn(orgId);
     syncQueue.fail = true;
     const res = await post(orgId, id, h);
-    expect(res.status).toBeGreaterThanOrEqual(500);
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      error: {
+        code: 'sync_not_available',
+        message: 'Could not start the sync. Try again in a moment.',
+      },
+    });
+    const runs = await owner.query(`select status from sync_runs where org_id = $1`, [orgId]);
+    expect(runs.rows).toEqual([{ status: 'failed' }]);
     const cursors = await owner.query(`select status from sync_cursors where org_id = $1`, [orgId]);
     expect(cursors.rows.every((r) => r.status !== 'running')).toBe(true);
     syncQueue.fail = false;

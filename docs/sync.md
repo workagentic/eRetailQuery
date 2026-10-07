@@ -129,3 +129,10 @@ Queue: `BullMqJobQueue` adds jobs named `page` to the `sync` queue with 5 attemp
 ## Reconnect and backfill
 
 A reconnect of a finished shop starts a new full backfill, and a reconnect while a chain is already past `locations` may overlap it. This is accepted: sinks are idempotent and respect `external_updated_at`. If the first job cannot be queued, `enqueueSync` fails the run and frees the cursor before rethrowing, so a retry can start.
+
+## Known gaps (1b-3c)
+
+- Sync now checks the connection status and running cursors, then starts, in separate transactions: a disconnect or a second click in that window can still race (sinks are idempotent, so the cost is a wasted run).
+- The `connection.sync_requested` audit row is written after the start, so a crash in between leaves a run without an audit row.
+- `coveredFrom` is `min(placed_at)` per connection with no dedicated `(org_id, store_connection_id, placed_at)` index; fine for now, add one if the list gets slow.
+- Summary wording is minimal: `failed` shows only the first failed resource's stored error, and a connection that finished some but not all resources reads as `never`.

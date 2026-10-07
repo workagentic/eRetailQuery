@@ -193,6 +193,26 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
         .where(eq(syncCursors.id, cursor.id));
       if (!done) return { kind: 'next', job };
 
+      // Connection health: only the real end of a chain counts. A chain still in progress records nothing.
+      if (!job.then || job.then.resources.length === 0) {
+        // An errored connection recovers only when none of its resources is still running or has failed,
+        // so another pending failure keeps the error visible. A disconnected connection is never touched.
+        const recovers = sql`${storeConnections.status} = 'error' and not exists (
+          select 1 from ${syncCursors}
+          where ${syncCursors.storeConnectionId} = ${storeConnections.id}
+            and ${syncCursors.status} in ('running', 'failed'))`;
+        await tx
+          .update(storeConnections)
+          .set({
+            lastSyncedAt: now,
+            status: sql`case when ${recovers} then 'active'::connection_status else ${storeConnections.status} end`,
+            lastError: sql`case when ${recovers} then null else ${storeConnections.lastError} end`,
+          })
+          .where(
+            and(eq(storeConnections.orgId, job.orgId), eq(storeConnections.id, job.connectionId)),
+          );
+      }
+
       let followUp: SyncPageJob | undefined;
       if (job.then && job.then.resources.length > 0) {
         const [next, ...rest] = job.then.resources;

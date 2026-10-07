@@ -18,7 +18,13 @@ export interface Harness {
 
 export function makeHarness(
   env: TestEnv,
-  opts: { data?: FakeData; pageSize?: number; deps?: Partial<SyncDeps> } = {},
+  opts: {
+    data?: FakeData;
+    pageSize?: number;
+    deps?: Partial<SyncDeps>;
+    /** Replaces the default registry (the FakeConnector under 'shopify'); `connector` is then unused. */
+    connectors?: ConnectorRegistry;
+  } = {},
 ): Harness {
   const queue = new InMemoryJobQueue();
   const connector = new FakeConnector(opts.data ?? sampleData(), opts.pageSize ?? 2);
@@ -32,7 +38,7 @@ export function makeHarness(
   };
   const deps: SyncDeps = {
     db: env.db,
-    connectors: new ConnectorRegistry().register('shopify', connector),
+    connectors: opts.connectors ?? new ConnectorRegistry().register('shopify', connector),
     limiter: new MemoryRateLimiter(() => nowMs),
     queue,
     keyProvider,

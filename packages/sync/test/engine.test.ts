@@ -356,6 +356,95 @@ describe('resumeStalledRuns', () => {
   });
 });
 
+describe('connection health', () => {
+  const conn = async () =>
+    (
+      await env.owner.query(
+        `select status, last_error, last_synced_at from store_connections where id = $1`,
+        [CONN_A],
+      )
+    ).rows[0];
+  const setConn = (status: string, lastError: string | null = null) =>
+    env.owner.query(
+      `update store_connections set status = $2, last_error = $3, last_synced_at = null where id = $1`,
+      [CONN_A, status, lastError],
+    );
+  beforeEach(() => setConn('active'));
+  afterAll(() => setConn('active'));
+  const runAll = (h: ReturnType<typeof makeHarness>) =>
+    enqueueSync(h.deps, {
+      orgId: ORG_A,
+      connectionId: CONN_A,
+      resources: 'all',
+      mode: 'backfill',
+      since,
+    });
+
+  it('records last_synced_at when a single-resource run completes and keeps the status', async () => {
+    const h = makeHarness(env);
+    await processSyncPage(h.deps, await start(h, 'locations'));
+    const c = await conn();
+    expect(c.status).toBe('active');
+    expect(c.last_synced_at.toISOString()).toBe('2026-10-06T12:00:00.000Z');
+  });
+  it('returns an errored connection to active after the last page of a chain', async () => {
+    await setConn('error', 'token revoked');
+    const h = makeHarness(env);
+    await runAll(h);
+    await drain(h);
+    const c = await conn();
+    expect([c.status, c.last_error]).toEqual(['active', null]);
+    expect(c.last_synced_at).not.toBeNull();
+  });
+  it('does not record or recover anything while a chain is still in progress', async () => {
+    await setConn('error', 'token revoked');
+    const h = makeHarness(env);
+    await runAll(h);
+    const first = await processSyncPage(h.deps, h.queue.take()!.job); // locations done, products follow
+    expect(first).toMatchObject({ kind: 'done', followUp: { resource: 'products' } });
+    const c = await conn();
+    expect([c.status, c.last_error, c.last_synced_at]).toEqual(['error', 'token revoked', null]);
+  });
+  it('never changes the status of a disconnected connection', async () => {
+    await setConn('disconnected', 'removed');
+    const h = makeHarness(env);
+    await processSyncPage(h.deps, await start(h, 'locations'));
+    const c = await conn();
+    expect([c.status, c.last_error]).toEqual(['disconnected', 'removed']);
+  });
+  it('leaves last_synced_at unchanged when the run fails', async () => {
+    const h = makeHarness(env);
+    const job = await start(h, 'products');
+    h.connector.failNext(new PermanentError('bad request'));
+    await processSyncPage(h.deps, job);
+    expect((await conn()).last_synced_at).toBeNull();
+    const again = await start(h, 'locations');
+    h.connector.failNext(new AuthError('token revoked'));
+    await processSyncPage(h.deps, again);
+    const c = await conn();
+    expect([c.status, c.last_synced_at]).toEqual(['error', null]);
+  });
+  it('does not recover while another resource of the connection has failed', async () => {
+    const h = makeHarness(env);
+    const orders = await start(h, 'orders');
+    h.connector.failNext(new PermanentError('bad request'));
+    await processSyncPage(h.deps, orders); // orders cursor is now failed
+    await setConn('error', 'token revoked');
+    await processSyncPage(h.deps, await start(h, 'locations'));
+    const c = await conn();
+    expect([c.status, c.last_error]).toEqual(['error', 'token revoked']);
+  });
+  it('is not changed again by a duplicated final job', async () => {
+    const h = makeHarness(env);
+    const job = await start(h, 'locations');
+    await processSyncPage(h.deps, job);
+    const before = (await conn()).last_synced_at.toISOString();
+    h.clock.advance(3_600_000);
+    expect(await processSyncPage(h.deps, job)).toEqual({ kind: 'done' });
+    expect((await conn()).last_synced_at.toISOString()).toBe(before);
+  });
+});
+
 describe('drain helper sanity', () => {
   it('runs a single resource to completion', async () => {
     const h = makeHarness(env);

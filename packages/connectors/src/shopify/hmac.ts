@@ -29,6 +29,78 @@ export function verifyOAuthQuery(
   return ts <= nowSec + 60 && nowSec - ts <= (opts.maxAgeSeconds ?? 600);
 }
 
+const MAX_QUERY_LENGTH = 4096;
+
+function hmacEquals(message: string, apiSecret: string, given: Buffer): boolean {
+  return safeEqual(createHmac('sha256', apiSecret).update(message).digest(), given);
+}
+
+/**
+ * Verifies the signature Shopify puts on the OAuth redirect, from the RAW query string.
+ * Shopify's docs do not say whether the signed message uses the encoded or the decoded values, so both are
+ * accepted (a valid HMAC under the app secret authenticates the same logical parameters either way).
+ * After the first real install, drop whichever form Shopify does not use.
+ */
+export function verifyOAuthRawQuery(
+  rawQuery: string,
+  apiSecret: string,
+  opts: { now?: Date; maxAgeSeconds?: number } = {},
+): boolean {
+  const query = rawQuery.startsWith('?') ? rawQuery.slice(1) : rawQuery;
+  if (!query || query.length > MAX_QUERY_LENGTH) return false;
+  const seen = new Set<string>();
+  let hmac: string | undefined;
+  const encoded: { key: string; pair: string }[] = [];
+  const decoded: { key: string; pair: string }[] = [];
+  let timestamp: string | undefined;
+  for (const pair of query.split('&')) {
+    const eq = pair.indexOf('=');
+    if (eq <= 0) return false;
+    let key: string;
+    let value: string;
+    try {
+      key = decodeURIComponent(pair.slice(0, eq).replace(/\+/g, ' '));
+      value = decodeURIComponent(pair.slice(eq + 1).replace(/\+/g, ' '));
+    } catch {
+      return false;
+    }
+    if (seen.has(key)) return false;
+    seen.add(key);
+    if (key === 'hmac') {
+      hmac = value;
+      continue;
+    }
+    if (key === 'timestamp') timestamp = value;
+    encoded.push({ key, pair });
+    decoded.push({ key, pair: `${key}=${value}` });
+  }
+  if (typeof hmac !== 'string' || !/^[0-9a-f]{64}$/i.test(hmac)) return false;
+  const bySortedKey = (a: { key: string }, b: { key: string }) =>
+    a.key < b.key ? -1 : a.key > b.key ? 1 : 0;
+  const given = Buffer.from(hmac, 'hex');
+  const matchEncoded = hmacEquals(
+    encoded
+      .sort(bySortedKey)
+      .map((p) => p.pair)
+      .join('&'),
+    apiSecret,
+    given,
+  );
+  const matchDecoded = hmacEquals(
+    decoded
+      .sort(bySortedKey)
+      .map((p) => p.pair)
+      .join('&'),
+    apiSecret,
+    given,
+  );
+  if (!(matchEncoded || matchDecoded)) return false;
+  const ts = Number(timestamp);
+  if (timestamp === undefined || !Number.isSafeInteger(ts)) return false;
+  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
+  return ts <= nowSec + 60 && nowSec - ts <= (opts.maxAgeSeconds ?? 600);
+}
+
 export function verifyWebhookSignature(
   rawBody: Buffer | string,
   hmacHeader: string | undefined,

@@ -558,7 +558,7 @@ describe('webhook_events_status_updated_idx', () => {
   });
 });
 ```
-(Adapt the org inserts to the orgs table's real required columns as the existing db tests do. `0018` must contain ONLY the preflight DO block and the payload UPDATE so re-running it in the test is harmless.)
+(Adapt the org inserts to the orgs table's real required columns as the existing db tests do. The preflight migration (found by its name) must contain ONLY the preflight DO block and the payload UPDATE so re-running it in the test is harmless.)
 
 - [ ] **Step 2: Run to see failures** — `pnpm --filter @erq/db exec vitest run test/shopify-active-shop.test.ts` → FAIL.
 
@@ -591,7 +591,7 @@ UPDATE webhook_events SET payload = '{}'::jsonb WHERE payload <> '{}'::jsonb;
       .on(t.platform, t.externalAccountId)
       .where(sql`${t.status} not in ('disconnected', 'demo')`),
 ```
-(import `uniqueIndex` and `sql` as needed), and in `webhooks.ts` replace/add `index('webhook_events_status_updated_idx').on(t.status, t.updatedAt)`. Run `pnpm --filter @erq/db generate` (becomes 0019, never hand-edited). Confirm the generated SQL creates exactly those two indexes. If drizzle-kit emits a conflicting rename or drop of an existing index, report it and adjust the schema so the generated migration contains only the two new indexes.
+(import `uniqueIndex` and `sql` as needed), and in `webhooks.ts` replace/add `index('webhook_events_status_updated_idx').on(t.status, t.updatedAt)`. Run `pnpm --filter @erq/db generate` (gets the next free number after the preflight migration, never hand-edited). Confirm the generated SQL creates exactly those two indexes. If drizzle-kit emits a conflicting rename or drop of an existing index, report it and adjust the schema so the generated migration contains only the two new indexes.
 
 - [ ] **Step 4: Run** — `pnpm turbo run test typecheck build --filter=@erq/db --concurrency=1` (the whole db package, including the isolation suite) and `pnpm exec eslint packages/db` → PASS; no leftover postgres processes.
 

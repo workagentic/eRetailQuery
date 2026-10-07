@@ -17,6 +17,8 @@ export interface SyncPageJob {
   resource: SyncResource;
   syncRunId: string;
   then?: SyncChain;
+  /** Set when the resumer re-enqueued this job: its chain is lost, so it must not record connection health. */
+  resumed?: true;
 }
 
 export interface RateLimitPolicy {

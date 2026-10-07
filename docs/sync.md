@@ -115,7 +115,10 @@ Queue: `BullMqJobQueue` adds jobs named `page` to the `sync` queue with 5 attemp
 - **`app_list_stalled_sync_cursors` must never be exposed through an API route.** It is the one intentional cross-tenant read and is for the worker only.
 - **Connection status is not checked before syncing.** A connection already in `error` or disabled still syncs if a job is enqueued.
 - **Late-linked order lines keep a null cost snapshot.** An order line synced before its variant's listing exists keeps `sku_id` null and a null cost snapshot until that order re-syncs. There is no relink pass yet, so COGS is understated until then.
-- **`store_connections.last_synced_at` is not maintained,** and the connection status is not reset to `active` after a successful sync that follows an `AuthError`.
+- **Connection health is recorded at the end of a chain.** When the last page of a chain completes, `store_connections.last_synced_at` is set and an `error` connection returns to `active` (only if none of its resources is still running or has failed). This includes single-resource runs, so `last_synced_at` can be set by a run that synced one resource only (revisit in 1b-3c).
+- **A resumed chain records no connection health.** `resumeStalledRuns` marks its jobs `resumed` because the chain is not persisted (1b-3c), so a resumed run never sets `last_synced_at` or recovers an errored connection.
+- **An outdated `last_error` can stay visible.** The recovery guard leaves the connection in `error` while another resource's cursor is `failed`, until that resource is re-run successfully.
+- **A failing job never changes a disconnected or demo connection.** Only `active`, `pending` and `error` connections are flagged `error`.
 - **`updated_since` has no overlap margin.** The incremental watermark is the worker clock at run start, so clock skew or late-arriving platform updates can be missed.
 - **Rate-limit numbers are placeholders** until 1b-2 and 1b-3.
 

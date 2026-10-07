@@ -194,7 +194,15 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
       if (!done) return { kind: 'next', job };
 
       // Connection health: only the real end of a chain counts. A chain still in progress records nothing.
-      if (!job.then || job.then.resources.length === 0) {
+      // A resumed job lost its chain, so it cannot tell a real chain end: it records nothing.
+      if (!job.resumed && (!job.then || job.then.resources.length === 0)) {
+        // Lock the connection row (after the cursor row, the same order as failRun) so the check below sees a
+        // failed cursor committed concurrently by another job of this connection.
+        await tx
+          .select({ id: storeConnections.id })
+          .from(storeConnections)
+          .where(eq(storeConnections.id, job.connectionId))
+          .for('update');
         // An errored connection recovers only when none of its resources is still running or has failed,
         // so another pending failure keeps the error visible. A disconnected connection is never touched.
         const recovers = sql`${storeConnections.status} = 'error' and not exists (

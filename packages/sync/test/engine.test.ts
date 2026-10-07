@@ -352,6 +352,7 @@ describe('resumeStalledRuns', () => {
       connectionId: CONN_A,
       resource: 'orders',
       syncRunId: job.syncRunId,
+      resumed: true,
     });
   });
 });
@@ -433,6 +434,27 @@ describe('connection health', () => {
     await processSyncPage(h.deps, await start(h, 'locations'));
     const c = await conn();
     expect([c.status, c.last_error]).toEqual(['error', 'token revoked']);
+  });
+  it('records nothing when a resumed job finishes (its chain is lost)', async () => {
+    await setConn('error', 'token revoked');
+    const h = makeHarness(env);
+    await start(h, 'locations');
+    expect(await resumeStalledRuns(h.deps, new Date(Date.now() + 60_000))).toBe(1);
+    const resumed = h.queue.take()!.job;
+    expect(await processSyncPage(h.deps, resumed)).toEqual({ kind: 'done' });
+    expect((await cursorRow('locations')).status).toBe('complete');
+    const c = await conn();
+    expect([c.status, c.last_error, c.last_synced_at]).toEqual(['error', 'token revoked', null]);
+  });
+  it('does not turn a disconnected connection into an error when a job fails', async () => {
+    await setConn('disconnected');
+    const h = makeHarness(env);
+    const job = await start(h, 'locations');
+    h.connector.failNext(new AuthError('token revoked'));
+    expect(await processSyncPage(h.deps, job)).toMatchObject({ kind: 'failed' });
+    const c = await conn();
+    expect([c.status, c.last_error]).toEqual(['disconnected', null]);
+    expect((await cursorRow('locations')).status).toBe('failed');
   });
   it('is not changed again by a duplicated final job', async () => {
     const h = makeHarness(env);

@@ -239,9 +239,11 @@ describe('full Shopify backfill through the engine', () => {
 
     // Refund lines and the restock flag.
     const refunded = await rows(
-      `select r.external_refund_id e, r.restock, r.amount_cents a from refunds r where r.org_id = :org`,
+      `select r.external_refund_id e, r.restock, r.amount_cents a from refunds r where r.org_id = :org order by r.external_refund_id`,
     );
-    const expectedRefunds = expected.orders.flatMap((o) => o.refunds);
+    const expectedRefunds = expected.orders
+      .flatMap((o) => o.refunds)
+      .sort((a, b) => (a.externalId < b.externalId ? -1 : a.externalId > b.externalId ? 1 : 0));
     expect(refunded.map((r) => [r.e, r.restock, Number(r.a)])).toEqual(
       expectedRefunds.map((r) => [r.externalId, r.restock, r.amountCents]),
     );

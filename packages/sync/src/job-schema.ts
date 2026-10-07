@@ -20,6 +20,7 @@ const schema = z
         path: ['since'],
       })
       .optional(),
+    resumed: z.literal(true).optional(),
   })
   .strict();
 

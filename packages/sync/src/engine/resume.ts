@@ -19,6 +19,7 @@ export async function resumeStalledRuns(deps: SyncDeps, olderThan: Date): Promis
       connectionId: r.o_store_connection_id,
       resource: r.o_resource,
       syncRunId: r.o_sync_run_id,
+      resumed: true,
     });
   }
   return rows.length;

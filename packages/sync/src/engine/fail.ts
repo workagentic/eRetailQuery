@@ -1,4 +1,4 @@
-import { and, eq } from 'drizzle-orm';
+import { and, eq, inArray } from 'drizzle-orm';
 import { sanitizeMessage } from '@erq/connectors';
 import { storeConnections, syncCursors, syncRuns, type Tx } from '@erq/db';
 import type { SyncPageJob } from '../ports';
@@ -32,7 +32,13 @@ export async function failRun(
     await tx
       .update(storeConnections)
       .set({ status: 'error', lastError: message })
-      .where(eq(storeConnections.id, job.connectionId));
+      // A disconnected or demo connection must never become `error` (it would escape the active-shop unique index).
+      .where(
+        and(
+          eq(storeConnections.id, job.connectionId),
+          inArray(storeConnections.status, ['active', 'pending', 'error']),
+        ),
+      );
   }
 }
 

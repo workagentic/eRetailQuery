@@ -1,3 +1,4 @@
+import { sql } from 'drizzle-orm';
 import {
   index,
   integer,
@@ -6,6 +7,7 @@ import {
   text,
   timestamp,
   unique,
+  uniqueIndex,
   uuid,
 } from 'drizzle-orm/pg-core';
 import { tenantId } from './tenant';
@@ -40,6 +42,9 @@ export const storeConnections = pgTable(
   (t) => [
     unique('store_connections_org_platform_acct_uq').on(t.orgId, t.platform, t.externalAccountId),
     unique('store_connections_org_id_uq').on(t.orgId, t.id),
+    uniqueIndex('store_connections_active_shop_uq')
+      .on(t.platform, t.externalAccountId)
+      .where(sql`${t.status} not in ('disconnected', 'demo')`),
   ],
 );
 

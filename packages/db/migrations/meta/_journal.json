@@ -134,6 +134,20 @@
       "when": 1791372946646,
       "tag": "0018_shopify_purge_shop_lock",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1791373277955,
+      "tag": "0019_shopify_active_shop_preflight",
+      "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1791373288985,
+      "tag": "0020_glossy_sister_grimm",
+      "breakpoints": true
     }
   ]
 }

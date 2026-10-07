@@ -141,6 +141,11 @@ describe('app_purge_shop', () => {
     expect(await count('store_connections where external_account_id = $1', [ERR])).toBe(0);
   });
   it('never purges a connection that is reinstalled (made active) while the purge is running', async () => {
+    // The active-shop unique index allows only one live connection per shop, so move the seeded active one away.
+    await owner.query(`update store_connections set external_account_id = $2 where id = $1`, [
+      ids.cActive,
+      'moved.myshopify.com',
+    ]);
     const c1 = await owner.connect();
     const c2 = await owner.connect();
     try {

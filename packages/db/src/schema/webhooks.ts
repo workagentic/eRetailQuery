@@ -67,5 +67,6 @@ export const webhookEvents = pgTable(
     }).onDelete('cascade'),
     uniqueIndex('webhook_events_dedupe_uq').on(t.orgId, t.storeConnectionId, t.externalEventId),
     index('webhook_events_status_received_idx').on(t.status, t.receivedAt),
+    index('webhook_events_status_updated_idx').on(t.status, t.updatedAt),
   ],
 );

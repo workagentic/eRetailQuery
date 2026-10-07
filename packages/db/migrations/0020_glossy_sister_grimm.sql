@@ -1,0 +1,2 @@
+CREATE UNIQUE INDEX "store_connections_active_shop_uq" ON "store_connections" USING btree ("platform","external_account_id") WHERE "store_connections"."status" not in ('disconnected', 'demo');--> statement-breakpoint
+CREATE INDEX "webhook_events_status_updated_idx" ON "webhook_events" USING btree ("status","updated_at");

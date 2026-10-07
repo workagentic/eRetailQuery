@@ -15,4 +15,4 @@ export interface SyncDeps {
   policies?: Record<string, RateLimitPolicy>;
 }
 
-export const nowOf = (deps: SyncDeps): Date => (deps.now ?? (() => new Date()))();
+export const nowOf = (deps: Pick<SyncDeps, 'now'>): Date => (deps.now ?? (() => new Date()))();

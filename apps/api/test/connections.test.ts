@@ -5,8 +5,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { decryptConnectionCredentials } from '@erq/connectors';
 import { FakeShopify, signOAuthRawQuery, signRawPairs } from '@erq/connectors/testing';
 import { hashOAuthNonce, type ConnectionsApi } from '@erq/db';
+import { ORDERS_HISTORY_DAYS, type JobQueue, type SyncPageJob } from '@erq/sync';
 import { EnvKeyProvider } from '@erq/shared';
-import { CONNECTIONS_API, HTTP_CLIENT } from '../src/connections/tokens';
+import type { SyncQueuePort } from '../src/connections/sync-queue';
+import { CONNECTIONS_API, HTTP_CLIENT, SYNC_QUEUE_PORT } from '../src/connections/tokens';
 import { TENANT_DB } from '../src/db/db.module';
 import { createTestApp, type TestApp } from './helpers/app';
 
@@ -21,11 +23,32 @@ const SHOPIFY_ENV = {
 let t: TestApp;
 let owner: Pool;
 let fake: FakeShopify;
+
+/** Records page jobs instead of talking to Redis; `fail` makes enqueue throw like a down Redis. */
+class RecordingSyncQueue implements SyncQueuePort, JobQueue {
+  available = true;
+  fail = false;
+  jobs: SyncPageJob[] = [];
+  async enqueue(job: SyncPageJob): Promise<void> {
+    if (this.fail) throw new Error('redis is down');
+    this.jobs.push(job);
+  }
+  reset(): void {
+    this.available = true;
+    this.fail = false;
+    this.jobs = [];
+  }
+}
+const syncQueue = new RecordingSyncQueue();
+
 beforeAll(async () => {
   fake = new FakeShopify();
   t = await createTestApp({
     env: SHOPIFY_ENV,
-    overrides: [{ provide: HTTP_CLIENT, useValue: fake }],
+    overrides: [
+      { provide: HTTP_CLIENT, useValue: fake },
+      { provide: SYNC_QUEUE_PORT, useValue: syncQueue },
+    ],
   });
   owner = new Pool({ connectionString: t.tdb.ownerUrl });
 });
@@ -702,5 +725,117 @@ describe('POST /connections/shopify/callback', () => {
     const res = await request(server()).get(`/connections/shopify/callback?${rawSigned(state)}`);
     expect(res.status).toBe(404);
     expect(await connectionCount(orgId)).toBe(0);
+  });
+});
+
+describe('first backfill after connect', () => {
+  const BF_SHOP = 'backfill-shop.myshopify.com';
+  const MINUTE = 60_000;
+  const DAY = 86_400_000;
+  beforeEach(async () => {
+    fake.reset();
+    syncQueue.reset();
+    await owner.query(
+      `update store_connections set status = 'disconnected' where external_account_id = $1`,
+      [BF_SHOP],
+    );
+  });
+  const connect = async (orgId: string, h: Record<string, string>) =>
+    callbackAs(authOnly(h), rawSigned(await startInstall(orgId, h, BF_SHOP), BF_SHOP));
+  const daysBack = (iso: string) => (Date.now() - new Date(iso).getTime()) / DAY;
+
+  it('enqueues one locations job that chains the rest, with a 60 day window without read_all_orders', async () => {
+    const { orgId, h } = await createOrg('Backfill Org');
+    const res = await connect(orgId, h);
+    expect(res.body).toEqual({ redirectTo: connected });
+    expect(syncQueue.jobs).toHaveLength(1);
+    const job = syncQueue.jobs[0]!;
+    expect(job).toMatchObject({
+      orgId,
+      resource: 'locations',
+      then: { resources: ['products', 'inventory', 'orders'], mode: 'backfill' },
+    });
+    const since = new Date(job.then!.since!).getTime();
+    const expected = Date.now() - ORDERS_HISTORY_DAYS.limited * DAY;
+    expect(Math.abs(since - expected)).toBeLessThan(MINUTE);
+    const runs = await owner.query(
+      `select r.status, r.type from sync_runs r where r.org_id = $1 and r.id = $2`,
+      [orgId, job.syncRunId],
+    );
+    expect(runs.rows).toEqual([{ status: 'running', type: 'backfill' }]);
+    const cursors = await owner.query(
+      `select resource, status from sync_cursors where org_id = $1`,
+      [orgId],
+    );
+    expect(cursors.rows).toEqual([{ resource: 'locations', status: 'running' }]);
+    expect(
+      (await owner.query(`select last_error from store_connections where org_id = $1`, [orgId]))
+        .rows,
+    ).toEqual([{ last_error: null }]);
+  });
+
+  it('reaches back 365 days when read_all_orders was granted', async () => {
+    const { orgId, h } = await createOrg('Backfill Full Org');
+    fake.respondNext({
+      status: 200,
+      body: JSON.stringify({ access_token: 'shpat_x', scope: 'read_orders,read_all_orders' }),
+    });
+    await connect(orgId, h);
+    expect(syncQueue.jobs).toHaveLength(1);
+    expect(daysBack(syncQueue.jobs[0]!.then!.since!)).toBeGreaterThan(364.9);
+    expect(daysBack(syncQueue.jobs[0]!.then!.since!)).toBeLessThan(365.1);
+  });
+
+  it('keeps the connection and records a retry hint when the queue is down', async () => {
+    const { orgId, h } = await createOrg('Backfill Down Org');
+    syncQueue.fail = true;
+    const res = await connect(orgId, h);
+    expect(res.body).toEqual({ redirectTo: connected });
+    const { rows } = await owner.query(
+      `select status, last_error from store_connections where org_id = $1`,
+      [orgId],
+    );
+    expect(rows).toEqual([
+      { status: 'active', last_error: 'Could not start the first import. Use Sync now.' },
+    ]);
+  });
+
+  it('does nothing and stores no error when no queue is configured', async () => {
+    const { orgId, h } = await createOrg('Backfill Noop Org');
+    syncQueue.available = false;
+    const res = await connect(orgId, h);
+    expect(res.body).toEqual({ redirectTo: connected });
+    expect(syncQueue.jobs).toEqual([]);
+    expect((await owner.query(`select 1 from sync_runs where org_id = $1`, [orgId])).rowCount).toBe(
+      0,
+    );
+    expect(
+      (await owner.query(`select last_error from store_connections where org_id = $1`, [orgId]))
+        .rows,
+    ).toEqual([{ last_error: null }]);
+  });
+
+  it('does not start a second chain when reconnecting while the first is running', async () => {
+    const { orgId, h } = await createOrg('Backfill Reconnect Org');
+    await connect(orgId, h);
+    expect(syncQueue.jobs).toHaveLength(1);
+    const again = await connect(orgId, h);
+    expect(again.body).toEqual({ redirectTo: connected });
+    expect(syncQueue.jobs).toHaveLength(1);
+    expect((await owner.query(`select 1 from sync_runs where org_id = $1`, [orgId])).rowCount).toBe(
+      1,
+    );
+  });
+
+  it('never puts a token, credentials or the callback query in a job', async () => {
+    const { orgId, h } = await createOrg('Backfill Secrets Org');
+    const state = await startInstall(orgId, h, BF_SHOP);
+    const query = rawSigned(state, BF_SHOP);
+    await callbackAs(authOnly(h), query);
+    expect(syncQueue.jobs).toHaveLength(1);
+    const payload = JSON.stringify(syncQueue.jobs[0]);
+    for (const secret of ['shpat_', 'good-code', state, 'test-secret', 'accessToken', 'hmac']) {
+      expect(payload).not.toContain(secret);
+    }
   });
 });

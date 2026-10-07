@@ -72,6 +72,16 @@ describe('enqueueSync', () => {
       connection_kind: 'store',
     });
   });
+  it('needs only the db, the queue and the clock', async () => {
+    const h = makeHarness(env);
+    const { db, queue, now } = h.deps;
+    const r = await enqueueSync(
+      { db, queue, now },
+      { orgId: ORG_A, connectionId: CONN_A, resources: ['locations'], mode: 'incremental' },
+    );
+    expect(r).toMatchObject({ resource: 'locations', started: true });
+    expect(h.queue.size).toBe(1);
+  });
   it('allows one active run per connection and resource', async () => {
     const h = makeHarness(env);
     const a = await enqueueSync(h.deps, {

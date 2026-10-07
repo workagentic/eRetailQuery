@@ -77,7 +77,7 @@ export async function startRun(
  * and start when their predecessor finishes (locations, products, inventory, orders).
  */
 export async function enqueueSync(
-  deps: SyncDeps,
+  deps: Pick<SyncDeps, 'db' | 'queue' | 'now'>,
   args: EnqueueSyncArgs,
 ): Promise<{ resource: SyncResource; syncRunId: string; started: boolean }> {
   const requested =

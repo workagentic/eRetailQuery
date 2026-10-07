@@ -22,14 +22,18 @@ import {
   HTTP_CLIENT,
   KEY_PROVIDER,
   SHOPIFY_CONFIG,
+  SYNC_QUEUE_PORT,
   WEBHOOK_QUEUE_PORT,
 } from './tokens';
+import { BullMqSyncQueue, NoopSyncQueue, SYNC_QUEUE_NAME, type SyncQueuePort } from './sync-queue';
+import { SyncStarter } from './sync-starter';
 import { BullMqWebhookQueue, NoopWebhookQueue, type WebhookQueue } from './webhook-queue';
 
 const REDIS_RESOURCES = Symbol('REDIS_RESOURCES');
 interface RedisResources {
   connection: IORedis;
   queue: Queue;
+  syncQueue: Queue;
 }
 
 @Injectable()
@@ -38,12 +42,14 @@ class RedisLifecycle implements OnApplicationShutdown {
   async onApplicationShutdown(): Promise<void> {
     if (!this.res) return;
     await this.res.queue.close();
+    await this.res.syncQueue.close();
     await this.res.connection.quit();
   }
 }
 
 const providers: Provider[] = [
   ConnectionsService,
+  SyncStarter,
   RedisLifecycle,
   {
     provide: SHOPIFY_CONFIG,
@@ -94,7 +100,11 @@ const providers: Provider[] = [
         enableOfflineQueue: false,
       });
       connection.on('error', (err) => logger.warn({ err: sanitizeMessage(err) }, 'redis error'));
-      return { connection, queue: new Queue(WEBHOOK_QUEUE, { connection }) };
+      return {
+        connection,
+        queue: new Queue(WEBHOOK_QUEUE, { connection }),
+        syncQueue: new Queue(SYNC_QUEUE_NAME, { connection }),
+      };
     },
   },
   {
@@ -102,6 +112,12 @@ const providers: Provider[] = [
     inject: [REDIS_RESOURCES],
     useFactory: (res: RedisResources | null): WebhookQueue =>
       res ? new BullMqWebhookQueue(res.queue) : new NoopWebhookQueue(),
+  },
+  {
+    provide: SYNC_QUEUE_PORT,
+    inject: [REDIS_RESOURCES],
+    useFactory: (res: RedisResources | null): SyncQueuePort =>
+      res ? new BullMqSyncQueue(res.syncQueue) : new NoopSyncQueue(),
   },
 ];
 

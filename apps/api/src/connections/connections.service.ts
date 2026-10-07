@@ -44,6 +44,7 @@ import {
   SHOPIFY_CONFIG,
   WEBHOOK_QUEUE_PORT,
 } from './tokens';
+import { SyncStarter } from './sync-starter';
 import type { WebhookQueue } from './webhook-queue';
 
 /** How long the webhook receiver waits for the queue before answering anyway (the worker sweep recovers). */
@@ -72,6 +73,7 @@ export class ConnectionsService {
     @Inject(APP_CONFIG) private readonly env: Env,
     @Inject(LOGGER) private readonly logger: Logger,
     @Inject(WEBHOOK_QUEUE_PORT) private readonly webhookQueue: WebhookQueue,
+    private readonly syncStarter: SyncStarter,
   ) {}
 
   private redirect(params: Record<string, string>): string {
@@ -198,14 +200,27 @@ export class ConnectionsService {
           'shopify webhook registration threw during connect',
         );
       }
-      if (webhooksOk) return this.redirect({ shopify: 'connected' });
+      // Best effort: a queue failure never breaks the connect. The stored (granted) scopes size the window.
+      let importFailed = false;
+      try {
+        await this.syncStarter.start({ orgId, connectionId, scopes: token.scopes });
+      } catch (err) {
+        importFailed = true;
+        this.logger.warn({ err: sanitizeMessage(err) }, 'shopify first import could not start');
+      }
+      if (webhooksOk && !importFailed) return this.redirect({ shopify: 'connected' });
+      const lastError = importFailed
+        ? 'Could not start the first import. Use Sync now.'
+        : 'Webhook setup failed. Reconnect to retry.';
       await this.db.withTenant(orgId, (tx) =>
         tx
           .update(storeConnections)
-          .set({ lastError: 'Webhook setup failed. Reconnect to retry.' })
+          .set({ lastError })
           .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, connectionId))),
       );
-      return this.redirect({ shopify: 'connected', warning: 'webhooks' });
+      return webhooksOk
+        ? this.redirect({ shopify: 'connected' })
+        : this.redirect({ shopify: 'connected', warning: 'webhooks' });
     } catch (err) {
       this.logger.error({ err: sanitizeMessage(err) }, 'shopify callback failed');
       return this.fail('server_error');

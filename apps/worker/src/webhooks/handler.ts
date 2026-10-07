@@ -113,7 +113,11 @@ export async function processWebhookEvent(
           );
         return rows[0];
       });
-      if (!conn) return 'processed'; // the connection (and with it this event) is already gone
+      if (!conn) {
+        // The connection is gone, so normally the event is too; close it if it somehow survived.
+        await deps.db.withTenant(orgId, (tx) => setStatus(tx, orgId, eventId, 'processed', now()));
+        return 'processed';
+      }
       // Purges every disconnected/errored connection of the shop in every org; an active reinstall is untouched.
       await deps.connections.purgeShop(conn.platform, conn.shop);
       // The cascade removed this event when its own connection was purged; if it was not (an active reinstall owns

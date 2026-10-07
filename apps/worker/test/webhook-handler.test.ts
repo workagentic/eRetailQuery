@@ -179,7 +179,7 @@ describe('processWebhookEvent', () => {
         .rowCount,
     ).toBe(1);
   });
-  it('shop/redact purges the shop in every org, leaving an active reinstall and other shops alone', async () => {
+  it('shop/redact purges every disconnected connection of the shop across orgs and leaves another shop alone', async () => {
     const ORG2 = '55555555-5555-4555-8555-555555555555';
     await owner.query(`insert into orgs (id, name, slug) values ($1, 'Org2', 'org2')`, [ORG2]);
     await owner.query(`update store_connections set status = 'disconnected' where id = $1`, [ORG]);
@@ -200,23 +200,58 @@ describe('processWebhookEvent', () => {
       (await owner.query(`select 1 from store_connections where id = $1`, [OTHER])).rowCount,
     ).toBe(1);
   });
-  it('shop/redact with a reinstalled (active) connection of the same shop removes nothing and still completes the event', async () => {
+  it('shop/redact on an active reinstall purges other orgs disconnected copies and completes its own event', async () => {
     const ORG2 = '77777777-7777-4777-8777-777777777777';
+    const OLD = '88888888-8888-4888-8888-888888888888';
     await owner.query(`insert into orgs (id, name, slug) values ($1, 'Org2', 'org2')`, [ORG2]);
-    await owner.query(`update store_connections set status = 'disconnected' where id = $1`, [ORG]);
     await owner.query(
-      `insert into store_connections (id, org_id, platform, external_account_id, status) values ($1, $2, 'shopify', 'main.myshopify.com', 'active')`,
-      ['88888888-8888-4888-8888-888888888888', ORG2],
+      `insert into store_connections (id, org_id, platform, external_account_id, status) values ($1, $2, 'shopify', 'main.myshopify.com', 'disconnected')`,
+      [OLD, ORG2],
     );
+    await owner.query(`insert into products (id, org_id, title) values ($1, $1, 'P')`, [ORG]);
     const id = await addEvent('shop/redact', { connection: ORG });
     expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: id })).toBe('processed');
+    const ev = (
+      await owner.query(`select status, processed_at from webhook_events where id = $1`, [id])
+    ).rows[0];
+    expect(ev.status).toBe('processed');
+    expect(ev.processed_at).not.toBeNull();
     expect(
-      (
-        await owner.query(
-          `select status from store_connections where id = '88888888-8888-4888-8888-888888888888'`,
-        )
-      ).rows[0].status,
+      (await owner.query(`select status from store_connections where id = $1`, [ORG])).rows[0]
+        .status,
     ).toBe('active');
+    expect((await owner.query(`select 1 from products where id = $1`, [ORG])).rowCount).toBe(1);
+    expect(
+      (await owner.query(`select 1 from store_connections where id = $1`, [OLD])).rowCount,
+    ).toBe(0);
+  });
+  it('shop/redact with a missing connection row closes the event without purging', async () => {
+    const id = await addEvent('shop/redact', { connection: ORG });
+    let reads = 0;
+    const stubbed: TenantDb = {
+      ...db,
+      withTenant: ((orgId: string, fn: (tx: unknown) => unknown) => {
+        // The second withTenant call is the connection read; answer it with no rows.
+        if (++reads === 2) {
+          const empty = { select: () => ({ from: () => ({ where: async () => [] }) }) };
+          return fn(empty);
+        }
+        return db.withTenant(orgId, fn as never);
+      }) as TenantDb['withTenant'],
+    };
+    let purged = 0;
+    const spy: ConnectionsApi = {
+      ...connections,
+      purgeShop: async () => {
+        purged++;
+        return 0;
+      },
+    };
+    expect(
+      await processWebhookEvent({ db: stubbed, connections: spy }, { orgId: ORG, eventId: id }),
+    ).toBe('processed');
+    expect(purged).toBe(0);
+    expect((await status(id)).status).toBe('processed');
   });
   it('a purgeShop failure marks the event failed with a sanitized message and rethrows', async () => {
     const id = await addEvent('shop/redact', { connection: OTHER });
@@ -287,17 +322,18 @@ describe('processWebhookEvent', () => {
   });
   it('rethrows the original error when recording the failure also fails', async () => {
     const id = await addEvent('shop/redact', { connection: OTHER });
-    let calls = 0;
+    let armed = false;
     const flaky: TenantDb = {
       ...db,
       withTenant: ((orgId: string, fn: never) => {
-        if (++calls >= 3) throw new Error('mark failed');
+        if (armed) throw new Error('mark failed');
         return db.withTenant(orgId, fn);
       }) as TenantDb['withTenant'],
     };
     const broken: ConnectionsApi = {
       ...connections,
       purgeShop: async () => {
+        armed = true;
         throw new Error('original boom');
       },
     };

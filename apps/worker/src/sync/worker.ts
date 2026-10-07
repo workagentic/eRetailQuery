@@ -12,7 +12,8 @@ export function createSyncWorker(
     connection,
     concurrency: opts.concurrency ?? 5,
   });
-  // After the last attempt, record the failure on the run so the owner sees it.
+  // After the last attempt, record the failure on the run so the owner sees it. The raw message is
+  // passed on and failSyncRun sanitizes it before storing (members can read cursor errors).
   worker.on('failed', (job, error) => {
     if (!job || job.name !== 'page') return;
     const finalAttempt =

@@ -295,6 +295,8 @@ export class ConnectionsService {
 
   /**
    * Public webhook receiver. Authorized only by the HMAC over the raw body bytes.
+   * The body is parsed only to reject non-JSON and is then discarded: it is never persisted
+   * (the stored payload is always `{}`) and the worker fetches any data it needs from Shopify.
    * Never log the payload, body or signature header.
    */
   async receiveWebhook(
@@ -310,9 +312,8 @@ export class ConnectionsService {
     }
     const parsed = parseWebhookHeaders(headers);
     if (!parsed) throw invalid();
-    let payload: unknown;
     try {
-      payload = JSON.parse(rawBody.toString('utf8'));
+      JSON.parse(rawBody.toString('utf8')); // validity check only; nothing from the body is retained
     } catch {
       throw new ApiError(400, 'invalid_payload', 'Webhook body is not valid JSON');
     }
@@ -333,7 +334,7 @@ export class ConnectionsService {
           storeConnectionId: conn.connectionId,
           topic: parsed.topic,
           externalEventId: parsed.webhookId,
-          payload,
+          payload: {},
         })
         .onConflictDoNothing({
           target: [

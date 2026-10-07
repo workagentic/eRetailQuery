@@ -103,7 +103,7 @@ describe('POST /webhooks/shopify', () => {
       store_connection_id: connectionId,
       external_event_id: headers['x-shopify-webhook-id'],
     });
-    expect(rows[0].payload).toEqual({ id: 1, note: 'spacing   matters' });
+    expect(rows[0].payload).toEqual({});
     expect(queue.jobs).toEqual([{ orgId, eventId: rows[0].id }]);
   });
   it('a redelivery of the same webhook id is stored once and enqueued once', async () => {
@@ -184,9 +184,32 @@ describe('POST /webhooks/shopify', () => {
     const res = await post(body, hdr(body));
     expect(res.status).toBe(400);
     // body-parser rejects it before the receiver runs, so this is the filter's code, not invalid_payload
-    expect(res.body).toEqual({ error: { code: 'bad_request', message: expect.any(String) } });
+    expect(res.body).toEqual({ error: { code: 'bad_request', message: 'Invalid request body' } });
     expect((await events()).length).toBe(before);
   });
+  it('never echoes a malformed body and stores nothing', async () => {
+    const body = '{"id": SECRETFRAGMENT,}';
+    const before = (await events()).length;
+    const res = await post(body, hdr(body));
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: { code: 'bad_request', message: 'Invalid request body' } });
+    expect(res.text).not.toContain('SECRETFRAGMENT');
+    expect((await events()).length).toBe(before);
+  });
+  it.each(['orders/updated', 'customers/redact', 'app/uninstalled'])(
+    'stores an empty payload and no body bytes for %s',
+    async (topic) => {
+      const body = '{"id": 1, "email": "customer@example.com"}';
+      const headers = hdr(body, { 'x-shopify-topic': topic });
+      expect((await post(body, headers)).status).toBe(200);
+      const rows = (await events()).filter(
+        (e) => e.external_event_id === headers['x-shopify-webhook-id'],
+      );
+      expect(rows).toHaveLength(1);
+      expect(rows[0].payload).toEqual({});
+      expect(JSON.stringify(rows)).not.toContain('customer@example.com');
+    },
+  );
   it('rejects a repeated hmac header', async () => {
     const body = '{"id":7}';
     const before = (await events()).length;

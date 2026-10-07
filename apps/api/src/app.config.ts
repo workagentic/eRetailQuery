@@ -1,5 +1,5 @@
 import type { INestApplication } from '@nestjs/common';
-import { json, type Request } from 'express';
+import { json, type ErrorRequestHandler, type Request } from 'express';
 
 /**
  * Create the Nest app with these options (main.ts and the test helper both use them):
@@ -18,8 +18,23 @@ const captureRawBody = (req: unknown, _res: unknown, buf: Buffer): void => {
   (req as RawBodyRequest).rawBody = buf;
 };
 
+/**
+ * Nest rewraps a body-parser SyntaxError as BadRequestException(err.message), and that message quotes
+ * a fragment of the caller's body. Answer parse failures here with a fixed body instead, in the
+ * same shape ApiExceptionFilter produces. Other parser errors (too large) fall through to the filter.
+ */
+const fixedParseError: ErrorRequestHandler = (err, _req, res, next) => {
+  if ((err as { type?: unknown } | null)?.type === 'entity.parse.failed') {
+    res.status(400).json({ error: { code: 'bad_request', message: 'Invalid request body' } });
+    return;
+  }
+  next(err);
+};
+
 /** Shared app-level configuration. Call before app.init(). The webhook parser is mounted first and marks the body as parsed, so the global parser skips that route. */
 export function configureApp(app: INestApplication): void {
   app.use(WEBHOOK_PATH, json({ limit: WEBHOOK_JSON_LIMIT, verify: captureRawBody }));
+  app.use(WEBHOOK_PATH, fixedParseError);
   app.use(json({ limit: DEFAULT_JSON_LIMIT, verify: captureRawBody }));
+  app.use(fixedParseError);
 }

@@ -303,6 +303,12 @@ async function startEmbedded(): Promise<TestDatabase> {
     await pg.start();
     server.pid = readPid(dir);
     server.createdAt = processCreation(server.pid);
+    if (process.platform === 'win32' && server.createdAt === undefined) {
+      // Without the creation time no pid is ever killed (pid-reuse guard); only the data-directory sweep still runs.
+      console.warn(
+        'erq test db: postmaster creation time unavailable, pid-based cleanup is disabled',
+      );
+    }
     await pg.createDatabase('erq');
     const ownerUrl = `postgres://erq_owner:owner@127.0.0.1:${port}/erq`;
     await runMigrations(ownerUrl, APP_USER_PASSWORD);

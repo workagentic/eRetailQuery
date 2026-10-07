@@ -136,18 +136,18 @@ describe('embedded test database cleanup', () => {
 });
 
 describe('sameProcessCreation', () => {
-  it('is true only for equal, defined creation times', () => {
-    expect(sameProcessCreation('20261008120000.123456+000', '20261008120000.123456+000')).toBe(
-      true,
-    );
-    expect(sameProcessCreation(' 20261008120000.123456+000 ', '20261008120000.123456+000')).toBe(
-      true,
-    );
-    expect(sameProcessCreation('20261008120000.123456+000', '20261008120001.000000+000')).toBe(
-      false,
-    );
-    expect(sameProcessCreation(undefined, '20261008120000.123456+000')).toBe(false);
-    expect(sameProcessCreation('20261008120000.123456+000', undefined)).toBe(false);
+  // Creation times are UTC tick counts as digit-only text, which is what processCreation returns.
+  const T1 = '639000000000000000';
+  const T2 = '639000000010000000';
+  it('is true only for equal, defined, non-empty creation times', () => {
+    expect(sameProcessCreation(T1, T1)).toBe(true);
+    expect(sameProcessCreation(` ${T1} `, T1)).toBe(true);
+    expect(sameProcessCreation(T1, T2)).toBe(false);
+    expect(sameProcessCreation(undefined, T1)).toBe(false);
+    expect(sameProcessCreation(T1, undefined)).toBe(false);
     expect(sameProcessCreation(undefined, undefined)).toBe(false);
+    expect(sameProcessCreation('', '')).toBe(false);
+    expect(sameProcessCreation('   ', '   ')).toBe(false);
+    expect(sameProcessCreation('', T1)).toBe(false);
   });
 });

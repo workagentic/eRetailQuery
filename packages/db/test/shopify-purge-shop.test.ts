@@ -158,7 +158,9 @@ describe('app_purge_shop', () => {
           settled = true;
         });
       await new Promise((r) => setTimeout(r, 500));
-      expect(settled, 'the purge must wait for the row lock').toBe(false);
+      // Only a timing hint: it cannot prove the purge waited. The assertions after the commit are what discriminate
+      // (the reinstalled connection survives and only the other copy is purged).
+      expect(settled, 'the purge settled before the reinstall committed').toBe(false);
       await c1.query('commit');
       const result = await Promise.race([
         purge,

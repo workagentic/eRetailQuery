@@ -48,10 +48,21 @@ describe('store_connections_active_shop_uq', () => {
     await insert(owner, O2, 'one.myshopify.com', 'disconnected');
     await insert(owner, O1, 'demo.myshopify.com', 'demo');
     await insert(owner, O2, 'demo.myshopify.com', 'demo');
+  });
+  it('allows a real disconnected -> active reconnect in the same org while another org holds a disconnected copy', async () => {
+    await insert(owner, O1, 'rc.myshopify.com', 'disconnected');
+    await insert(owner, O2, 'rc.myshopify.com', 'disconnected');
     await owner.query(
-      `update store_connections set status = 'active' where org_id = $1 and external_account_id = 'demo.myshopify.com'`,
+      `update store_connections set status = 'active' where org_id = $1 and external_account_id = 'rc.myshopify.com'`,
       [O1],
     );
+    // The other org's copy can no longer go live while the first one is.
+    await expect(
+      owner.query(
+        `update store_connections set status = 'active' where org_id = $1 and external_account_id = 'rc.myshopify.com'`,
+        [O2],
+      ),
+    ).rejects.toMatchObject({ code: '23505' });
   });
   it('lets exactly one of two concurrent connects of a new shop win', async () => {
     const results = await Promise.allSettled([
@@ -90,24 +101,49 @@ describe('preflight and payload scrub migration', () => {
       ).rows[0].payload,
     ).toEqual({});
   });
-  it('the preflight aborts and names the shop when duplicates already exist', async () => {
+  // Runs the preflight migration inside a rolled-back transaction after dropping the unique index and seeding `rows`.
+  const runPreflight = async (rows: [string, string, string][]) => {
     const client = await owner.connect();
     try {
       await client.query('begin');
       await client.query('drop index store_connections_active_shop_uq');
-      await insert(client, O1, 'dup.myshopify.com', 'active');
-      await insert(client, O2, 'dup.myshopify.com', 'active');
+      for (const [org, shop, status] of rows) await insert(client, org, shop, status);
       let message = '';
       try {
         for (const statement of sqlFile()) await client.query(statement);
       } catch (e) {
         message = (e as Error).message;
       }
-      expect(message).toContain('dup.myshopify.com');
+      return message;
     } finally {
       await client.query('rollback');
       client.release();
     }
+  };
+  it('the preflight aborts and names the shop when duplicates already exist', async () => {
+    const message = await runPreflight([
+      [O1, 'dup.myshopify.com', 'active'],
+      [O2, 'dup.myshopify.com', 'active'],
+    ]);
+    expect(message).toContain('dup.myshopify.com');
+  });
+  it('the preflight also aborts for pending and error duplicates', async () => {
+    const message = await runPreflight([
+      [O1, 'dup2.myshopify.com', 'pending'],
+      [O2, 'dup2.myshopify.com', 'error'],
+    ]);
+    expect(message).toContain('dup2.myshopify.com');
+  });
+  it('the preflight passes when the only duplicates are disconnected or demo', async () => {
+    const message = await runPreflight([
+      [O1, 'ok.myshopify.com', 'disconnected'],
+      [O2, 'ok.myshopify.com', 'disconnected'],
+      [O1, 'okdemo.myshopify.com', 'demo'],
+      [O2, 'okdemo.myshopify.com', 'demo'],
+      [O1, 'okmix.myshopify.com', 'active'],
+      [O2, 'okmix.myshopify.com', 'disconnected'],
+    ]);
+    expect(message).toBe('');
   });
 });
 

@@ -124,4 +124,18 @@ describe('verifyOAuthRawQuery', () => {
       }),
     ).toBe(false);
   });
+  it('accepts only a plain digit timestamp (no whitespace, sign, exponent or 13+ digits)', () => {
+    // `now` is chosen so each value would sit inside the window if Number() were allowed to parse it.
+    const verifyAt = (value: string, nowMs: number) =>
+      verifyOAuthRawQuery(signOAuthRawQuery({ ...params(), timestamp: value }, SECRET), SECRET, {
+        now: new Date(nowMs),
+      });
+    expect(verifyAt('123', 130_000)).toBe(true);
+    for (const bad of [' 123', '+123', '123 ', '-1', '1e3']) {
+      expect(verifyAt(bad, bad === '-1' ? 0 : bad === '1e3' ? 1_000_000 : 130_000), bad).toBe(
+        false,
+      );
+    }
+    expect(verifyAt('1000000000000', 1_000_000_000_000_000)).toBe(false);
+  });
 });

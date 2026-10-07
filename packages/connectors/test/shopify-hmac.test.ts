@@ -54,7 +54,7 @@ describe('buildAuthorizeUrl', () => {
         shop: 'a.myshopify.com',
         apiKey: 'k',
         scopes: ['read_orders', 'read_products'],
-        redirectUri: 'https://api.example.com/connections/shopify/callback',
+        redirectUri: 'https://app.example.com/connections/shopify/callback',
         state: 'n',
       }),
     );
@@ -62,7 +62,7 @@ describe('buildAuthorizeUrl', () => {
     expect(u.searchParams.get('client_id')).toBe('k');
     expect(u.searchParams.get('scope')).toBe('read_orders,read_products');
     expect(u.searchParams.get('redirect_uri')).toBe(
-      'https://api.example.com/connections/shopify/callback',
+      'https://app.example.com/connections/shopify/callback',
     );
     expect(u.searchParams.get('state')).toBe('n');
   });

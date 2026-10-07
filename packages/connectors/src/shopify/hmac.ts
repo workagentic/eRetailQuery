@@ -80,7 +80,8 @@ export function verifyOAuthRawQuery(
   // `a=1&b=2` and `a=1%26b%3D2` would sign identically, so only the encoded candidate may match.
   if (!(matchEncoded || (matchDecoded && decodedAllowed))) return false;
   const ts = Number(timestamp);
-  if (timestamp === undefined || !Number.isSafeInteger(ts)) return false;
+  if (timestamp === undefined || !/^\d{1,12}$/.test(timestamp) || !Number.isSafeInteger(ts))
+    return false;
   const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
   return ts <= nowSec + 60 && nowSec - ts <= (opts.maxAgeSeconds ?? 600);
 }

@@ -15,6 +15,7 @@ import type { Env } from '../config/env';
 import { TENANT_DB } from '../db/db.module';
 import { ConnectionsController } from './connections.controller';
 import { ConnectionsService } from './connections.service';
+import { ShopifyCallbackController } from './shopify-callback.controller';
 import { ShopifyPublicController } from './shopify-public.controller';
 import {
   CONNECTIONS_API,
@@ -50,13 +51,15 @@ const providers: Provider[] = [
     useFactory: (env: Env): ShopifyConfig | null => {
       if (!env.SHOPIFY_API_KEY || !env.SHOPIFY_API_SECRET || !env.API_PUBLIC_URL) return null;
       const base = env.API_PUBLIC_URL.replace(/\/+$/, '');
+      // Shopify redirects the browser to the web app, which forwards the query to the authenticated API callback.
+      const web = env.WEB_PUBLIC_URL.replace(/\/+$/, '');
       return shopifyConfigSchema.parse({
         apiKey: env.SHOPIFY_API_KEY,
         apiSecret: env.SHOPIFY_API_SECRET,
         scopes: env.SHOPIFY_SCOPES.split(',')
           .map((s) => s.trim())
           .filter(Boolean),
-        redirectUri: `${base}/connections/shopify/callback`,
+        redirectUri: `${web}/connections/shopify/callback`,
         webhookUrl: `${base}/webhooks/shopify`,
       });
     },
@@ -103,7 +106,7 @@ const providers: Provider[] = [
 ];
 
 @Module({
-  controllers: [ConnectionsController, ShopifyPublicController],
+  controllers: [ConnectionsController, ShopifyCallbackController, ShopifyPublicController],
   providers,
   exports: [
     SHOPIFY_CONFIG,

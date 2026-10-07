@@ -24,5 +24,14 @@ export const SHOPIFY_ERROR_CODES = [
   'exchange_failed',
   'not_configured',
   'server_error',
+  'wrong_account',
+  'not_allowed',
 ] as const;
 export type ShopifyErrorCode = (typeof SHOPIFY_ERROR_CODES)[number];
+
+/** Body of the authenticated callback: the raw, still-encoded query string Shopify sent (no leading `?` needed). */
+export const shopifyCallbackInput = z.object({ query: z.string().min(1).max(4096) });
+export type ShopifyCallbackInput = z.infer<typeof shopifyCallbackInput>;
+export interface ShopifyCallbackResponse {
+  redirectTo: string;
+}

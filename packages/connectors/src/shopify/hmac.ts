@@ -8,27 +8,6 @@ function safeEqual(a: Buffer, b: Buffer): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-export function verifyOAuthQuery(
-  query: Record<string, string | string[] | undefined>,
-  apiSecret: string,
-  opts: { now?: Date; maxAgeSeconds?: number } = {},
-): boolean {
-  const { hmac, ...rest } = query;
-  if (typeof hmac !== 'string' || !/^[0-9a-f]{64}$/i.test(hmac)) return false;
-  const pairs: string[] = [];
-  for (const key of Object.keys(rest).sort()) {
-    const value = rest[key];
-    if (typeof value !== 'string') return false; // repeated parameters are never valid
-    pairs.push(`${key}=${value}`);
-  }
-  const expected = createHmac('sha256', apiSecret).update(pairs.join('&')).digest();
-  if (!safeEqual(expected, Buffer.from(hmac, 'hex'))) return false;
-  const ts = Number(rest.timestamp);
-  if (!Number.isSafeInteger(ts)) return false;
-  const nowSec = Math.floor((opts.now ?? new Date()).getTime() / 1000);
-  return ts <= nowSec + 60 && nowSec - ts <= (opts.maxAgeSeconds ?? 600);
-}
-
 const MAX_QUERY_LENGTH = 4096;
 
 function hmacEquals(message: string, apiSecret: string, given: Buffer): boolean {

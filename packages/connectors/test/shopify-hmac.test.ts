@@ -1,60 +1,9 @@
 // packages/connectors/test/shopify-hmac.test.ts
 import { describe, expect, it } from 'vitest';
-import {
-  buildAuthorizeUrl,
-  parseWebhookHeaders,
-  verifyOAuthQuery,
-  verifyWebhookSignature,
-} from '../src';
-import { signOAuthQuery, signWebhook } from '../src/testing';
+import { buildAuthorizeUrl, parseWebhookHeaders, verifyWebhookSignature } from '../src';
+import { signWebhook } from '../src/testing';
 
 const SECRET = 'hush';
-const NOW = new Date('2026-10-07T12:00:00Z');
-const ts = (d: Date) => String(Math.floor(d.getTime() / 1000));
-const params = (): Record<string, string> => ({
-  code: 'c0de',
-  shop: 'a.myshopify.com',
-  state: 'n0nce',
-  timestamp: ts(NOW),
-  host: 'YWRtaW4=',
-});
-
-describe('verifyOAuthQuery', () => {
-  it('accepts a correctly signed, fresh query (parameter order does not matter)', () => {
-    const q = signOAuthQuery(params(), SECRET);
-    const reversed = Object.fromEntries(Object.entries(q).reverse());
-    expect(verifyOAuthQuery(reversed, SECRET, { now: NOW })).toBe(true);
-  });
-  it('rejects tampering, the wrong secret, a missing or malformed hmac and repeated parameters', () => {
-    const q = signOAuthQuery(params(), SECRET);
-    expect(verifyOAuthQuery({ ...q, code: 'other' }, SECRET, { now: NOW })).toBe(false);
-    expect(verifyOAuthQuery(q, 'wrong', { now: NOW })).toBe(false);
-    const noHmac: Record<string, string | undefined> = { ...q, hmac: undefined };
-    expect(verifyOAuthQuery(noHmac, SECRET, { now: NOW })).toBe(false);
-    expect(verifyOAuthQuery({ ...q, shop: ['a.myshopify.com', 'b'] }, SECRET, { now: NOW })).toBe(
-      false,
-    );
-    expect(verifyOAuthQuery({ ...q, hmac: 'zz' }, SECRET, { now: NOW })).toBe(false);
-    expect(verifyOAuthQuery({ ...q, hmac: q.hmac!.slice(0, -2) }, SECRET, { now: NOW })).toBe(
-      false,
-    );
-  });
-  it('rejects stale, far-future and missing timestamps', () => {
-    const old = signOAuthQuery(
-      { ...params(), timestamp: ts(new Date(NOW.getTime() - 3600_000)) },
-      SECRET,
-    );
-    expect(verifyOAuthQuery(old, SECRET, { now: NOW })).toBe(false);
-    const future = signOAuthQuery(
-      { ...params(), timestamp: ts(new Date(NOW.getTime() + 3600_000)) },
-      SECRET,
-    );
-    expect(verifyOAuthQuery(future, SECRET, { now: NOW })).toBe(false);
-    const noTs: Record<string, string> = params();
-    delete noTs.timestamp;
-    expect(verifyOAuthQuery(signOAuthQuery(noTs, SECRET), SECRET, { now: NOW })).toBe(false);
-  });
-});
 
 describe('verifyWebhookSignature', () => {
   const body = '{"id":1,"note":"héllo"}';

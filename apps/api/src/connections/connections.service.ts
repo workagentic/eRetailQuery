@@ -10,7 +10,7 @@ import {
   parseWebhookHeaders,
   registerWebhooks,
   sanitizeMessage,
-  verifyOAuthQuery,
+  verifyOAuthRawQuery,
   verifyWebhookSignature,
   type HttpClient,
   type ShopifyConfig,
@@ -21,11 +21,18 @@ import {
   hashOAuthNonce,
   insertAudit,
   oauthStates,
+  orgMembers,
   storeConnections,
   webhookEvents,
   type TenantDb,
 } from '@erq/db';
-import type { ConnectionDto, InstallResponse, KeyProvider, ShopifyErrorCode } from '@erq/shared';
+import {
+  hasRole,
+  type ConnectionDto,
+  type InstallResponse,
+  type KeyProvider,
+  type ShopifyErrorCode,
+} from '@erq/shared';
 import { ApiError } from '../common/api-error';
 import { APP_CONFIG, LOGGER } from '../config/config.module';
 import type { Env } from '../config/env';
@@ -41,6 +48,18 @@ import type { WebhookQueue } from './webhook-queue';
 
 /** How long the webhook receiver waits for the queue before answering anyway (the worker sweep recovers). */
 export const WEBHOOK_ENQUEUE_TIMEOUT_MS = 2000;
+
+const ACTIVE_SHOP_INDEX = 'store_connections_active_shop_uq';
+
+/** True for a Postgres unique violation on the one-active-org-per-shop index (raw or wrapped by Drizzle). */
+function isActiveShopConflict(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && typeof e === 'object' && depth < 3; depth++) {
+    const { code, constraint } = e as { code?: unknown; constraint?: unknown };
+    if (code === '23505' && constraint === ACTIVE_SHOP_INDEX) return true;
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
 
 @Injectable()
 export class ConnectionsService {
@@ -65,28 +84,34 @@ export class ConnectionsService {
   }
 
   /**
-   * Public OAuth callback. Authorized only by Shopify's query HMAC plus the single-use state.
+   * Authenticated OAuth callback. The caller must be the user who started the install (the single-use state
+   * names them) and still an owner or admin of the state's org; the org never comes from the session.
    * Always returns a redirect URL and never throws. Never log the query, code, state or token.
    */
-  async completeInstall(query: Record<string, string | string[] | undefined>): Promise<string> {
+  async completeInstall(userId: string, rawQuery: string): Promise<string> {
     try {
       const cfg = this.config;
       const keyProvider = this.keyProvider;
       if (!cfg || !keyProvider) return this.fail('not_configured');
-      const { code, shop, state } = query;
-      if (
-        !verifyOAuthQuery(query, cfg.apiSecret) ||
-        typeof code !== 'string' ||
-        typeof shop !== 'string' ||
-        typeof state !== 'string' ||
-        !code ||
-        !state
-      ) {
-        return this.fail('invalid_request');
-      }
+      if (!verifyOAuthRawQuery(rawQuery, cfg.apiSecret)) return this.fail('invalid_request');
+      const params = new URLSearchParams(rawQuery);
+      const code = params.get('code');
+      const shop = params.get('shop');
+      const state = params.get('state');
+      if (!code || !shop || !state) return this.fail('invalid_request');
       if (!isValidShopDomain(shop)) return this.fail('invalid_request');
+      // From here on the state is burned, whatever the outcome.
       const consumed = await this.api.consumeOAuthState(hashOAuthNonce(state));
       if (!consumed) return this.fail('state_expired');
+      if (consumed.userId !== userId) return this.fail('wrong_account');
+      const role = await this.db.withTenant(consumed.orgId, async (tx) => {
+        const rows = await tx
+          .select({ role: orgMembers.role })
+          .from(orgMembers)
+          .where(and(eq(orgMembers.orgId, consumed.orgId), eq(orgMembers.userId, userId)));
+        return rows[0]?.role;
+      });
+      if (!role || !hasRole(role, 'admin')) return this.fail('not_allowed');
       if (consumed.shop !== shop) return this.fail('shop_mismatch');
       const existing = await this.api.findStoreConnection('shopify', shop);
       if (existing && existing.orgId !== consumed.orgId && existing.status !== 'disconnected') {
@@ -103,48 +128,60 @@ export class ConnectionsService {
       } catch {
         return this.fail('exchange_failed');
       }
-      const { orgId, userId } = consumed;
-      const connectionId = await this.db.withTenant(orgId, async (tx) => {
-        const [row] = await tx
-          .insert(storeConnections)
-          .values({
+      const { orgId } = consumed;
+      let connectionId: string;
+      try {
+        connectionId = await this.db.withTenant(orgId, async (tx) => {
+          const [row] = await tx
+            .insert(storeConnections)
+            .values({
+              orgId,
+              platform: 'shopify',
+              externalAccountId: shop,
+              status: 'active',
+              scopes: token.scopes,
+              lastError: null,
+            })
+            .onConflictDoUpdate({
+              target: [
+                storeConnections.orgId,
+                storeConnections.platform,
+                storeConnections.externalAccountId,
+              ],
+              set: {
+                status: 'active',
+                scopes: token.scopes,
+                lastError: null,
+                updatedAt: new Date(),
+              },
+            })
+            .returning({ id: storeConnections.id });
+          if (!row) throw new Error('connection upsert returned no row');
+          await tx
+            .update(storeConnections)
+            .set({
+              encryptedCredentials: encryptConnectionCredentials(
+                { accessToken: token.accessToken },
+                keyProvider,
+                row.id,
+              ),
+            })
+            .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, row.id)));
+          await insertAudit(tx, {
             orgId,
-            platform: 'shopify',
-            externalAccountId: shop,
-            status: 'active',
-            scopes: token.scopes,
-            lastError: null,
-          })
-          .onConflictDoUpdate({
-            target: [
-              storeConnections.orgId,
-              storeConnections.platform,
-              storeConnections.externalAccountId,
-            ],
-            set: { status: 'active', scopes: token.scopes, lastError: null, updatedAt: new Date() },
-          })
-          .returning({ id: storeConnections.id });
-        if (!row) throw new Error('connection upsert returned no row');
-        await tx
-          .update(storeConnections)
-          .set({
-            encryptedCredentials: encryptConnectionCredentials(
-              { accessToken: token.accessToken },
-              keyProvider,
-              row.id,
-            ),
-          })
-          .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, row.id)));
-        await insertAudit(tx, {
-          orgId,
-          actorUserId: userId,
-          action: 'connection.connected',
-          entityType: 'store_connection',
-          entityId: row.id,
-          after: { platform: 'shopify', shop },
+            actorUserId: consumed.userId,
+            action: 'connection.connected',
+            entityType: 'store_connection',
+            entityId: row.id,
+            after: { platform: 'shopify', shop },
+          });
+          return row.id;
         });
-        return row.id;
-      });
+      } catch (err) {
+        // The partial unique index is the authority when two orgs race for the same shop.
+        if (isActiveShopConflict(err)) return this.fail('shop_in_use');
+        throw err;
+      }
       // Network calls happen outside the transaction.
       let webhooksOk = false;
       try {

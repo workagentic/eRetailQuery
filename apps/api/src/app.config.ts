@@ -31,10 +31,9 @@ const fixedParseError: ErrorRequestHandler = (err, _req, res, next) => {
   next(err);
 };
 
-/** Shared app-level configuration. Call before app.init(). The webhook parser is mounted first and marks the body as parsed, so the global parser skips that route. */
+/** Shared app-level configuration. Call before app.init(). The webhook parser is mounted first and marks the body as parsed, so the global parser skips that route. A parse error from either parser reaches the single global fixedParseError below (error handlers run in order whatever their path). */
 export function configureApp(app: INestApplication): void {
   app.use(WEBHOOK_PATH, json({ limit: WEBHOOK_JSON_LIMIT, verify: captureRawBody }));
-  app.use(WEBHOOK_PATH, fixedParseError);
   app.use(json({ limit: DEFAULT_JSON_LIMIT, verify: captureRawBody }));
   app.use(fixedParseError);
 }

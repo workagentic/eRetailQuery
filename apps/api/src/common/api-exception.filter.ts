@@ -48,6 +48,9 @@ export class ApiExceptionFilter implements ExceptionFilter {
       status = exception.getStatus();
       body = { error: { code: STATUS_CODES[status] ?? 'error', message: exception.message } };
     } else if (isBodyParserError(exception)) {
+      // Malformed JSON is answered earlier by fixedParseError (app.config.ts), so this branch now serves the other
+      // body-parser errors, such as 413 entity.too.large.
+
       status = exception.status;
       body = {
         error: { code: STATUS_CODES[status] ?? 'bad_request', message: 'Invalid request body' },

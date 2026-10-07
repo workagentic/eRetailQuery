@@ -35,6 +35,17 @@ describe('POST /orgs and GET /me', () => {
     expect(res.body.error).toMatchObject({ code: 'validation_failed' });
     expect((await request(server()).post('/orgs').set(h)).status).toBe(400);
   });
+  it('answers malformed JSON with a fixed 400 that never echoes the body', async () => {
+    const h = await as(randomUUID(), 'x@example.com');
+    const res = await request(server())
+      .post('/orgs')
+      .set(h)
+      .set('content-type', 'application/json')
+      .send('{"name": DISTINCTIVEFRAGMENT,}');
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: { code: 'bad_request', message: 'Invalid request body' } });
+    expect(res.text).not.toContain('DISTINCTIVEFRAGMENT');
+  });
   it('requires authentication', async () => {
     expect((await request(server()).get('/me')).status).toBe(401);
     expect((await request(server()).post('/orgs').send({ name: 'Nope Inc' })).status).toBe(401);

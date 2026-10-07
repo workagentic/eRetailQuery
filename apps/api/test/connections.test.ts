@@ -7,6 +7,7 @@ import { FakeShopify, signOAuthRawQuery, signRawPairs } from '@erq/connectors/te
 import { hashOAuthNonce, type ConnectionsApi } from '@erq/db';
 import { EnvKeyProvider } from '@erq/shared';
 import { CONNECTIONS_API, HTTP_CLIENT } from '../src/connections/tokens';
+import { TENANT_DB } from '../src/db/db.module';
 import { createTestApp, type TestApp } from './helpers/app';
 
 const SHOPIFY_ENV = {
@@ -264,6 +265,9 @@ async function startInstall(orgId: string, h: Record<string, string>, shop = SHO
     .send({ shop });
   return new URL(res.body.authorizeUrl).searchParams.get('state')!;
 }
+/** The token exchange is the first network call after the pre-checks; a refused callback must never reach it. */
+const exchangeRequests = () =>
+  fake.requests.filter((r) => new URL(r.url).pathname === '/admin/oauth/access_token');
 const connectionCount = async (orgId: string) =>
   (await owner.query(`select 1 from store_connections where org_id = $1`, [orgId])).rowCount;
 
@@ -387,9 +391,11 @@ describe('POST /connections/shopify/callback', () => {
     const stranger = { authorization: `Bearer ${await t.signToken({ sub: randomUUID() })}` };
     for (const other of [admin, stranger]) {
       const state = await startInstall(orgId, h);
+      fake.reset();
       const res = await callbackAs(authOnly(other), rawSigned(state));
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ redirectTo: failed('wrong_account') });
+      expect(exchangeRequests()).toEqual([]);
       // The right user cannot finish it afterwards: the link is single use.
       expect((await callbackAs(authOnly(h), rawSigned(state))).body).toEqual({
         redirectTo: failed('state_expired'),
@@ -401,6 +407,7 @@ describe('POST /connections/shopify/callback', () => {
   it('refuses a starter who is no longer an owner or admin of the org', async () => {
     const { orgId, user, h } = await createOrg('Demoted Org');
     const state = await startInstall(orgId, h);
+    fake.reset();
     await owner.query(`update org_members set role = 'viewer' where org_id = $1 and user_id = $2`, [
       orgId,
       user,
@@ -423,6 +430,41 @@ describe('POST /connections/shopify/callback', () => {
     });
     expect(await connectionCount(orgId)).toBe(0);
     expect(await connectionCount(second.orgId)).toBe(0);
+    expect(exchangeRequests()).toEqual([]);
+  });
+
+  it('also refuses a starter who was demoted to analyst', async () => {
+    const { orgId, user, h } = await createOrg('Analyst Demoted Org');
+    const state = await startInstall(orgId, h);
+    fake.reset();
+    await owner.query(
+      `update org_members set role = 'analyst' where org_id = $1 and user_id = $2`,
+      [orgId, user],
+    );
+    expect((await callbackAs(authOnly(h), rawSigned(state))).body).toEqual({
+      redirectTo: failed('not_allowed'),
+    });
+    expect(exchangeRequests()).toEqual([]);
+    expect(await connectionCount(orgId)).toBe(0);
+  });
+
+  it('checks the user and the role before the shop (a mismatched shop never hides them)', async () => {
+    const { orgId, user, h } = await createOrg('Order Org');
+    const stranger = { authorization: `Bearer ${await t.signToken({ sub: randomUUID() })}` };
+    const wrongUser = await startInstall(orgId, h);
+    fake.reset();
+    expect(
+      (await callbackAs(authOnly(stranger), rawSigned(wrongUser, 'other-shop.myshopify.com'))).body,
+    ).toEqual({ redirectTo: failed('wrong_account') });
+    const demoted = await startInstall(orgId, h);
+    await owner.query(`update org_members set role = 'viewer' where org_id = $1 and user_id = $2`, [
+      orgId,
+      user,
+    ]);
+    expect(
+      (await callbackAs(authOnly(h), rawSigned(demoted, 'other-shop.myshopify.com'))).body,
+    ).toEqual({ redirectTo: failed('not_allowed') });
+    expect(exchangeRequests()).toEqual([]);
   });
 
   it('answers 401 when signed out or with an invalid token', async () => {
@@ -524,8 +566,10 @@ describe('POST /connections/shopify/callback', () => {
   it('consumes the state even when the shop does not match', async () => {
     const { orgId, h } = await createOrg('Mismatch Org');
     const state = await startInstall(orgId, h);
+    fake.reset();
     const res = await callbackAs(authOnly(h), rawSigned(state, 'other-shop.myshopify.com'));
     expect(res.body).toEqual({ redirectTo: failed('shop_mismatch') });
+    expect(exchangeRequests()).toEqual([]);
     expect((await callbackAs(authOnly(h), rawSigned(state))).body).toEqual({
       redirectTo: failed('state_expired'),
     });
@@ -553,8 +597,11 @@ describe('POST /connections/shopify/callback', () => {
     const one = await createOrg('Shop Owner One');
     await callbackAs(authOnly(one.h), rawSigned(await startInstall(one.orgId, one.h)));
     const two = await createOrg('Shop Owner Two');
-    const res = await callbackAs(authOnly(two.h), rawSigned(await startInstall(two.orgId, two.h)));
+    const twoState = await startInstall(two.orgId, two.h);
+    fake.reset();
+    const res = await callbackAs(authOnly(two.h), rawSigned(twoState));
     expect(res.body).toEqual({ redirectTo: failed('shop_in_use') });
+    expect(exchangeRequests()).toEqual([]);
     expect(await connectionCount(two.orgId)).toBe(0);
   });
 
@@ -574,6 +621,35 @@ describe('POST /connections/shopify/callback', () => {
       spy.mockRestore();
     }
     expect(await connectionCount(two.orgId)).toBe(0);
+  });
+
+  it.each([
+    ['a generic database error', new Error('connection reset')],
+    [
+      'a unique violation on a different constraint',
+      Object.assign(new Error('duplicate key'), {
+        code: '23505',
+        constraint: 'store_connections_org_platform_acct_uq',
+      }),
+    ],
+  ])('answers server_error, not shop_in_use, for %s', async (_label, failure) => {
+    const { orgId, h } = await createOrg(`Server Error Org ${randomUUID().slice(0, 4)}`);
+    const state = await startInstall(orgId, h);
+    const db = t.app.get<{ withTenant: (...args: unknown[]) => Promise<unknown> }>(TENANT_DB);
+    const original = db.withTenant.bind(db);
+    let calls = 0;
+    // The first withTenant call is the role check; the second is the connection upsert, which fails.
+    const spy = vi.spyOn(db, 'withTenant').mockImplementation((...args: unknown[]) => {
+      if (++calls === 2) return Promise.reject(failure);
+      return original(...args);
+    });
+    try {
+      const res = await callbackAs(authOnly(h), rawSigned(state));
+      expect(res.body).toEqual({ redirectTo: failed('server_error') });
+    } finally {
+      spy.mockRestore();
+    }
+    expect(await connectionCount(orgId)).toBe(0);
   });
 
   it('lets exactly one of two orgs win a concurrent connect of the same new shop', async () => {

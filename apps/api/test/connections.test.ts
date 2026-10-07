@@ -5,7 +5,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { decryptConnectionCredentials } from '@erq/connectors';
 import { FakeShopify, signOAuthRawQuery, signRawPairs } from '@erq/connectors/testing';
 import { hashOAuthNonce, type ConnectionsApi } from '@erq/db';
-import { ORDERS_HISTORY_DAYS, type JobQueue, type SyncPageJob } from '@erq/sync';
+import {
+  IMPORT_NOT_STARTED_MESSAGE,
+  ORDERS_HISTORY_DAYS,
+  type JobQueue,
+  type SyncPageJob,
+} from '@erq/sync';
 import { EnvKeyProvider } from '@erq/shared';
 import type { SyncQueuePort } from '../src/connections/sync-queue';
 import { syncStartTimeout } from '../src/connections/connections.service';
@@ -828,6 +833,32 @@ describe('first backfill after connect', () => {
     expect(syncQueue.jobs).toHaveLength(1);
   });
 
+  it('stores the webhook warning, not the import one, when both fail (a reconnect fixes both)', async () => {
+    const { orgId, h } = await createOrg('Backfill Both Down Org');
+    syncQueue.fail = true;
+    fake.respondNext({
+      status: 200,
+      body: JSON.stringify({ access_token: 'shpat_x', scope: 'read_orders' }),
+    });
+    fake.failNext(500);
+    const res = await connect(orgId, h);
+    expect(res.body).toEqual({
+      redirectTo: `${WEB}/connections?shopify=connected&warning=webhooks`,
+    });
+    const { rows } = await owner.query(
+      `select status, last_error from store_connections where org_id = $1`,
+      [orgId],
+    );
+    expect(rows).toEqual([
+      { status: 'active', last_error: 'Webhook setup failed. Reconnect to retry.' },
+    ]);
+    syncQueue.fail = false;
+  });
+
+  it('uses the shared import-not-started text that the sync engine clears', () => {
+    expect(IMPORT_NOT_STARTED_MESSAGE).toBe('Could not start the first import. Use Sync now.');
+  });
+
   it('answers the callback even when the queue never responds', async () => {
     const { orgId, h } = await createOrg('Backfill Hang Org');
     const hang = syncQueue.enqueue.bind(syncQueue);
@@ -1019,6 +1050,14 @@ describe('sync summary', () => {
     expect(await summary(orgId, h, other)).toMatchObject({
       coveredFrom: '2025-01-01T00:00:00.000Z',
     });
+    // A test order (Shopify's test checkout) is not real history: it never widens coveredFrom.
+    await ins(id, 'o-test', '2024-06-01T00:00:00Z');
+    await owner.query(`update orders set is_test = true where external_order_id = 'o-test'`);
+    expect(await summary(orgId, h, id)).toMatchObject({ coveredFrom: '2026-02-01T08:30:00.000Z' });
+    const onlyTest = await conn(orgId);
+    await ins(onlyTest, 'o-test-2', '2024-06-01T00:00:00Z');
+    await owner.query(`update orders set is_test = true where external_order_id = 'o-test-2'`);
+    expect(await summary(orgId, h, onlyTest)).toMatchObject({ coveredFrom: null });
   });
 
   it('canStart is false for unusable connections and when no queue is configured', async () => {

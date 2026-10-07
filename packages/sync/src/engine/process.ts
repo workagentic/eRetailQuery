@@ -21,7 +21,7 @@ import { upsertLocations } from '../sinks/locations';
 import { upsertOrders } from '../sinks/orders';
 import { upsertProducts } from '../sinks/products';
 import { nowOf, type SyncDeps } from './deps';
-import { failRun, safeMessage } from './fail';
+import { failRun, IMPORT_NOT_STARTED_MESSAGE, safeMessage } from './fail';
 import { startRun } from './start';
 
 function applyPage(
@@ -209,12 +209,13 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
           select 1 from ${syncCursors}
           where ${syncCursors.storeConnectionId} = ${storeConnections.id}
             and ${syncCursors.status} in ('running', 'failed'))`;
+        // The "first import did not start" warning is false once a chain has really ended: clear it too.
         await tx
           .update(storeConnections)
           .set({
             lastSyncedAt: now,
             status: sql`case when ${recovers} then 'active'::connection_status else ${storeConnections.status} end`,
-            lastError: sql`case when ${recovers} then null else ${storeConnections.lastError} end`,
+            lastError: sql`case when ${recovers} or ${storeConnections.lastError} = ${IMPORT_NOT_STARTED_MESSAGE} then null else ${storeConnections.lastError} end`,
           })
           .where(
             and(eq(storeConnections.orgId, job.orgId), eq(storeConnections.id, job.connectionId)),

@@ -6,6 +6,12 @@ import { nowOf, type SyncDeps } from './deps';
 
 export const safeMessage = (error: unknown): string => sanitizeMessage(error, 500);
 
+/**
+ * Stored on an active connection when the first import could not be queued at connect time. The
+ * real end of a later sync chain clears it (processSyncPage), so it never outlives a good import.
+ */
+export const IMPORT_NOT_STARTED_MESSAGE = 'Could not start the first import. Use Sync now.';
+
 /** Marks the job's run and cursor failed (only if that run is still the current one). Optionally flags the connection. */
 export async function failRun(
   tx: Tx,
@@ -42,11 +48,15 @@ export async function failRun(
   }
 }
 
-/** Called by the worker after the last queue attempt. */
+/**
+ * Called by the worker after the last queue attempt with the raw error text. The text is sanitized
+ * here (tokens, secrets and query strings removed, capped at 500) because cursor `last_error` is
+ * shown to every org member through GET /connections.
+ */
 export async function failSyncRun(
   deps: SyncDeps,
   job: SyncPageJob,
   message: string,
 ): Promise<void> {
-  await deps.db.withTenant(job.orgId, (tx) => failRun(tx, job, message.slice(0, 500), nowOf(deps)));
+  await deps.db.withTenant(job.orgId, (tx) => failRun(tx, job, safeMessage(message), nowOf(deps)));
 }

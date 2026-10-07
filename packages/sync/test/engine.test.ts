@@ -8,7 +8,7 @@ import {
 import { sampleData } from '@erq/connectors/testing';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { enqueueSync } from '../src/engine/start';
-import { failSyncRun } from '../src/engine/fail';
+import { failSyncRun, IMPORT_NOT_STARTED_MESSAGE } from '../src/engine/fail';
 import { processSyncPage } from '../src/engine/process';
 import { resumeStalledRuns } from '../src/engine/resume';
 import type { RateLimiter, SyncPageJob } from '../src/ports';
@@ -380,6 +380,20 @@ describe('failSyncRun', () => {
     await failSyncRun(h.deps, { ...job, syncRunId: '00000000-0000-4000-8000-000000000002' }, 'old');
     expect((await cursorRow('orders')).status).toBe('running');
   });
+  it('sanitizes the raw queue error before storing it (members can read it)', async () => {
+    const h = makeHarness(env);
+    const job = await start(h, 'orders');
+    const raw =
+      'fetch failed for https://a.myshopify.com/admin/api/2025-07/graphql.json?access_token=abc123 ' +
+      'with token shpat_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE';
+    await failSyncRun(h.deps, job, raw);
+    const stored = (await cursorRow('orders')).last_error as string;
+    expect(stored).not.toMatch(/shpat_|abc123|access_token=abc/);
+    expect(stored).toContain('[redacted]');
+    const run = await runRow(job.syncRunId);
+    expect(run.error).not.toMatch(/shpat_|abc123/);
+    expect(stored.length).toBeLessThanOrEqual(500);
+  });
 });
 
 describe('resumeStalledRuns', () => {
@@ -437,6 +451,37 @@ describe('connection health', () => {
     const c = await conn();
     expect([c.status, c.last_error]).toEqual(['active', null]);
     expect(c.last_synced_at).not.toBeNull();
+  });
+  it('clears the "import did not start" warning on an active connection at the real chain end', async () => {
+    await setConn('active', IMPORT_NOT_STARTED_MESSAGE);
+    const h = makeHarness(env);
+    await runAll(h);
+    const first = await processSyncPage(h.deps, h.queue.take()!.job);
+    expect(first).toMatchObject({ kind: 'done', followUp: { resource: 'products' } });
+    expect((await conn()).last_error).toBe(IMPORT_NOT_STARTED_MESSAGE); // mid-chain: unchanged
+    await h.queue.enqueue((first as { followUp: SyncPageJob }).followUp);
+    await drain(h);
+    const c = await conn();
+    expect([c.status, c.last_error]).toEqual(['active', null]);
+  });
+  it('keeps any other warning on an active connection at the chain end', async () => {
+    await setConn('active', 'Webhook setup failed. Reconnect to retry.');
+    const h = makeHarness(env);
+    await runAll(h);
+    await drain(h);
+    const c = await conn();
+    expect([c.status, c.last_error]).toEqual([
+      'active',
+      'Webhook setup failed. Reconnect to retry.',
+    ]);
+  });
+  it('keeps the "import did not start" warning when only a resumed job finishes', async () => {
+    await setConn('active', IMPORT_NOT_STARTED_MESSAGE);
+    const h = makeHarness(env);
+    await start(h, 'locations');
+    expect(await resumeStalledRuns(h.deps, new Date(Date.now() + 60_000))).toBe(1);
+    expect(await processSyncPage(h.deps, h.queue.take()!.job)).toEqual({ kind: 'done' });
+    expect((await conn()).last_error).toBe(IMPORT_NOT_STARTED_MESSAGE);
   });
   it('does not record or recover anything while a chain is still in progress', async () => {
     await setConn('error', 'token revoked');

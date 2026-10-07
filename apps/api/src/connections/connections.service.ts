@@ -37,6 +37,7 @@ import {
   type ShopifyErrorCode,
   type SyncNowResponse,
 } from '@erq/shared';
+import { IMPORT_NOT_STARTED_MESSAGE } from '@erq/sync';
 import { ApiError } from '../common/api-error';
 import { APP_CONFIG, LOGGER } from '../config/config.module';
 import type { Env } from '../config/env';
@@ -235,9 +236,11 @@ export class ConnectionsService {
         clearTimeout(timer);
       }
       if (webhooksOk && !importFailed) return this.redirect({ shopify: 'connected' });
-      const lastError = importFailed
-        ? 'Could not start the first import. Use Sync now.'
-        : 'Webhook setup failed. Reconnect to retry.';
+      // One warning fits: a webhook failure wins because a reconnect fixes both (it also restarts
+      // the import). The import text is the shared constant the sync engine clears at a chain end.
+      const lastError = !webhooksOk
+        ? 'Webhook setup failed. Reconnect to retry.'
+        : IMPORT_NOT_STARTED_MESSAGE;
       try {
         await this.db.withTenant(orgId, (tx) =>
           tx
@@ -322,7 +325,8 @@ export class ConnectionsService {
       const covered = await tx
         .select({ connectionId: orders.storeConnectionId, from: min(orders.placedAt) })
         .from(orders)
-        .where(eq(orders.orgId, orgId))
+        // Test orders are not real sales history, so they never widen the covered range.
+        .where(and(eq(orders.orgId, orgId), eq(orders.isTest, false)))
         .groupBy(orders.storeConnectionId);
       const byConn = new Map<string, typeof cursors>();
       for (const c of cursors) {

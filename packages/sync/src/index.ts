@@ -1,5 +1,6 @@
 export * from './ports';
 export * from './policies';
+export * from './history';
 export * from './memory';
 export * from './cogs';
 export * from './sinks/context';

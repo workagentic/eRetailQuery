@@ -2,11 +2,12 @@ import path from 'node:path';
 import { Queue } from 'bullmq';
 import dotenv from 'dotenv';
 import IORedis from 'ioredis';
-import { ConnectorRegistry, sanitizeMessage } from '@erq/connectors';
+import { sanitizeMessage } from '@erq/connectors';
 import { createConnectionsApi, createTenantDb, type TenantDb } from '@erq/db';
 import { createLogger, EnvKeyProvider, WEBHOOK_QUEUE } from '@erq/shared';
 import type { SyncDeps } from '@erq/sync';
 import { BullMqJobQueue, SYNC_QUEUE } from './sync/bullmq-queue';
+import { createWorkerConnectors } from './sync/connectors';
 import { RedisRateLimiter } from './sync/redis-rate-limiter';
 import { createSyncWorker, scheduleResumeStalled } from './sync/worker';
 import { createSystemWorker, SYSTEM_QUEUE } from './system-worker';
@@ -45,8 +46,7 @@ async function main(): Promise<void> {
     syncQueue = new Queue(SYNC_QUEUE, { connection });
     const deps: SyncDeps = {
       db,
-      // Real connectors are registered in 1b-3.
-      connectors: new ConnectorRegistry(),
+      connectors: createWorkerConnectors(process.env),
       limiter: new RedisRateLimiter(connection),
       queue: new BullMqJobQueue(syncQueue),
       keyProvider: EnvKeyProvider.fromEnv(process.env),

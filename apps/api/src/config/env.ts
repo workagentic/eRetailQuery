@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { DEFAULT_SHOPIFY_SCOPES } from '@erq/connectors';
 
 const schema = z
   .object({
@@ -17,7 +18,7 @@ const schema = z
     ENCRYPTION_OLD_KEYS: z.string().min(1).optional(),
     SHOPIFY_API_KEY: z.string().min(1).optional(),
     SHOPIFY_API_SECRET: z.string().min(1).optional(),
-    SHOPIFY_SCOPES: z.string().default('read_products,read_inventory,read_locations,read_orders'),
+    SHOPIFY_SCOPES: z.string().default(DEFAULT_SHOPIFY_SCOPES.join(',')),
   })
   .refine((v) => v.SUPABASE_JWKS_URL || v.SUPABASE_JWT_SECRET, {
     message: 'Set SUPABASE_JWKS_URL or SUPABASE_JWT_SECRET',

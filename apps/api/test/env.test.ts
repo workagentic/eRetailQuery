@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import { DEFAULT_SHOPIFY_SCOPES } from '@erq/connectors';
 import { loadEnv } from '../src/config/env';
 
 const base = {
@@ -30,7 +31,7 @@ describe('loadEnv', () => {
     const env = loadEnv({ ...base, SUPABASE_JWT_SECRET: 's' });
     expect(env.SHOPIFY_API_KEY).toBeUndefined();
     expect(env.ENCRYPTION_KEY).toBeUndefined();
-    expect(env.SHOPIFY_SCOPES).toBe('read_products,read_inventory,read_locations,read_orders');
+    expect(env.SHOPIFY_SCOPES).toBe(DEFAULT_SHOPIFY_SCOPES.join(','));
   });
   it('rejects a non-URL API_PUBLIC_URL', () => {
     expect(() => loadEnv({ ...base, SUPABASE_JWT_SECRET: 's', API_PUBLIC_URL: 'nope' })).toThrow();

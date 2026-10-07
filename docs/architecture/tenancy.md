@@ -32,14 +32,17 @@ Trust model: the functions trust their arguments. `app_create_org` and `app_list
 
 Migration `0011_sync_orders_rls.sql` adds a fourth, `app_list_stalled_sync_cursors(older_than)`. It is the only intentional cross-tenant read: it lists `running` sync cursors across all orgs that have not moved since the threshold, so the worker's stalled-run resumer (which has no org context) can re-enqueue them. It returns only ids. It must never be exposed through an API route.
 
-Phase 1b-2 adds four more (migrations 0014 to 0016), all with the pinned `search_path`, EXECUTE revoked from PUBLIC, `anon` and `authenticated`, and granted only to `app_user`:
+Phase 1b-2 adds four more (migrations 0014 to 0016), and 1b-3a adds `app_purge_shop` (0017, locking in 0018), all with the pinned `search_path`, EXECUTE revoked from PUBLIC, `anon` and `authenticated`, and granted only to `app_user`:
 
-- `app_consume_oauth_state(nonce_hash)`: single-use consume of an OAuth state. Caller: the public OAuth callback only.
-- `app_find_store_connection(platform, external_account_id)`: returns org id, connection id and status. Callers: the public OAuth callback and the Shopify webhook receiver only.
+- `app_consume_oauth_state(nonce_hash)`: single-use consume of an OAuth state. Caller: the authenticated OAuth callback endpoint only (`POST /connections/shopify/callback`); no public callback route remains.
+- `app_find_store_connection(platform, external_account_id)`: returns org id, connection id and status. Callers: the authenticated OAuth callback endpoint and the Shopify webhook receiver only.
 - `app_list_stale_webhook_events(older_than, limit)`: cross-tenant read of ids of stale `received` and `processing` webhook events. Caller: the worker sweep only.
-- `app_purge_store_connection(org_id, connection_id)`: deletes one connection's data including ledger rows. Caller: the worker's `shop/redact` handler only.
+- `app_purge_store_connection(org_id, connection_id)`: deletes one connection's data including ledger rows. Caller: `app_purge_shop` only.
+- `app_purge_shop(platform, external_account_id)`: purges every `disconnected` or `error` connection of that platform and shop across all orgs (rows locked `FOR UPDATE`, one audit row per org), by calling `app_purge_store_connection` for each. Never touches `active`, `pending` or `demo` connections. Caller: the worker's `shop/redact` handler only. `app_purge_store_connection` filters `oauth_states` by platform as well as shop.
 
-None of these four may be exposed through an authenticated API route. The two public callers are authorized by Shopify's HMAC (plus the single-use state), never by user input.
+None of these five may be exposed through a generic authenticated API route. The OAuth callback endpoint is authorized by the signed-in user plus Shopify's HMAC and the single-use state (the caller must be the user who started the install and a current owner or admin of the state's org); the webhook receiver is authorized by Shopify's HMAC. Neither trusts user input for the org.
+
+The unique index `store_connections_active_shop_uq` (migration 0020) is cross-org by design: a shop can be non-disconnected in only one org at a time, whatever RLS lets each org see. Callers that hit it (the callback upsert) map the violation to `shop_in_use`.
 
 The migration role must be a superuser or have BYPASSRLS, because these functions write across RLS-protected tables. Supabase's `postgres` role qualifies.
 

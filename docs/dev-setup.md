@@ -38,6 +38,10 @@ A single repo-root `.env` is the only env file. `apps/api` and `apps/worker` loa
 
 Database tests use Testcontainers when Docker is reachable, otherwise they fall back automatically to `embedded-postgres`. Force a mode with `ERQ_TEST_DB=docker|embedded|auto` (default `auto`).
 
+Other packages load `@erq/db/testing` from `dist`, so run `pnpm turbo run build --filter=@erq/db` before running another package's tests directly (turbo runs it for you through `dependsOn`).
+
+Embedded Postgres cleanup: in embedded mode the helper stops the server and removes its `erq-pg-*` temp directory on stop, process exit and SIGINT/SIGTERM. On Windows it records the postmaster's exact creation time after start and only kills a pid whose current creation time equals it, killing the postmaster first and its children after, so no orphan `postgres.exe` survives. The POSIX paths are unverified until CI. After a crashed run, check `Get-Process postgres` and delete leftover `erq-pg-*` folders.
+
 Not yet verified: the Redis/BullMQ system-worker test and the Playwright e2e both need Docker, and neither has been run in the original dev environment (no Docker or Supabase there). Treat the first CI run as their first real execution.
 
 Low disk: each package's tests start their own Postgres, so run them serially with `pnpm turbo run test --concurrency=1`. Parallel runs can hit ENOSPC on small disks. Leftover `erq-pg-*` folders in the OS temp directory can be deleted.

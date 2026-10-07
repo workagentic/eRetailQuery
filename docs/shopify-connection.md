@@ -1,6 +1,6 @@
-# Shopify connection (Phase 1b-2)
+# Shopify connection (Phase 1b-2, hardened in 1b-3a)
 
-This document describes what 1b-2 built: connecting a Shopify store to an org, storing the access token encrypted, receiving and storing webhooks, and handling uninstall and the mandatory privacy webhooks. It does not fetch any Shopify data (that is 1b-3). Everything below was built and tested against fakes; nothing has run against real Shopify (see section 8).
+This document describes what 1b-2 built and 1b-3a hardened: connecting a Shopify store to an org, storing the access token encrypted, receiving and storing webhooks, and handling uninstall and the mandatory privacy webhooks. It does not fetch any Shopify data (that is 1b-3). Everything below was built and tested against fakes; nothing has run against real Shopify (see section 8).
 
 ## 1. Overview
 
@@ -10,18 +10,28 @@ Install
   api  stores oauth_states (SHA-256 of nonce, 10 min), returns { authorizeUrl }
   web  redirects the browser to https://<shop>/admin/oauth/authorize?client_id&scope&redirect_uri&state
 
-Callback (public route)
-  Shopify --redirect--> api GET /connections/shopify/callback?code&shop&state&hmac&timestamp...
-  api: verify query HMAC + timestamp -> validate shop -> app_consume_oauth_state (single use)
-       -> shop must equal the shop bound to the state -> shop_in_use check
-       -> exchange code for token (form-urlencoded POST, no db transaction open)
-       -> withTenant(orgId): upsert store_connections (active), store encrypted token, audit row
-       -> register the app/uninstalled subscription (GraphQL) -> 302 to ${WEB_PUBLIC_URL}/connections?shopify=connected
-          (or ?shopify=connected&warning=webhooks, or ?shopify_error=<code>)
+Callback (authenticated, through the web app)
+  Shopify --redirect--> web GET ${WEB_PUBLIC_URL}/connections/shopify/callback?code&shop&state&hmac&timestamp...
+  web route: forwards the raw query and the user's session -> api POST /connections/shopify/callback { query } (AuthGuard only)
+       (no session: 401 -> web redirects to /login?next=<the callback URL>, so the user signs in and the callback resumes)
+  api (ConnectionsService.completeInstall), in this order:
+       1. Shopify and the encryption key configured            -> else not_configured
+       2. verifyOAuthRawQuery (HMAC over the raw query, timestamp) -> else invalid_request
+       3. code, shop, state present and the shop domain valid  -> else invalid_request
+       4. app_consume_oauth_state (single use, the state is burned from here on) -> else state_expired
+       5. consumed.userId must equal the signed-in user        -> else wrong_account
+       6. the user must CURRENTLY be owner or admin of the state's org (the org comes from the state, never the session) -> else not_allowed
+       7. shop must equal the shop bound to the state          -> else shop_mismatch
+       8. shop_in_use pre-check (active in another org)        -> else shop_in_use
+       9. exchange code for token (form-urlencoded POST, no db transaction open) -> else exchange_failed
+      10. withTenant(orgId): upsert store_connections (active), store encrypted token, audit row;
+          a unique violation on store_connections_active_shop_uq -> shop_in_use
+      11. register the app/uninstalled subscription (GraphQL)
+  api returns { redirectTo }; web maps it to /connections?shopify=connected (or &warning=webhooks, or ?shopify_error=<code>)
 
-Webhook (public route)
+Webhook (the only public Shopify route)
   Shopify --POST /webhooks/shopify--> api: HMAC over raw body -> headers -> app_find_store_connection
-       -> insert webhook_events (dedupe) -> enqueue { orgId, eventId } (BullMQ, optional) -> 200
+       -> insert webhook_events (dedupe, payload always {}) -> enqueue { orgId, eventId } (BullMQ, optional) -> 200
   worker: claim event -> act by topic -> processed | deferred | ignored | failed
   worker sweep (every 5 min): re-enqueue stale events
 ```
@@ -36,8 +46,8 @@ Create an app in the Shopify Partner organisation (Dev Dashboard) and put these 
 |---|---|
 | App client id | `SHOPIFY_API_KEY` |
 | App client secret | `SHOPIFY_API_SECRET` |
-| Allowed redirection URL `${API_PUBLIC_URL}/connections/shopify/callback` | App configuration (Dev Dashboard or `shopify.app.toml`). It must exactly match, because `redirectUri` is built from `API_PUBLIC_URL` with trailing slashes removed. |
-| Compliance webhooks `customers/data_request`, `customers/redact`, `shop/redact` with URI `${API_PUBLIC_URL}/webhooks/shopify` | App configuration (`[[webhooks.subscriptions]]` with `compliance_topics` in `shopify.app.toml`). The same endpoint also receives the per-shop `app/uninstalled` subscription the callback registers. |
+| Allowed redirection URL `${WEB_PUBLIC_URL}/connections/shopify/callback` (the WEB app, not the API) | App configuration (Dev Dashboard or `shopify.app.toml`). It must exactly match, because `redirectUri` is built from `WEB_PUBLIC_URL` with trailing slashes removed. The user must be signed in to eRetailQuery to complete a connection. |
+| Compliance webhooks `customers/data_request`, `customers/redact`, `shop/redact` with URI `${API_PUBLIC_URL}/webhooks/shopify` (`API_PUBLIC_URL` is still needed for the webhook URL) | App configuration (`[[webhooks.subscriptions]]` with `compliance_topics` in `shopify.app.toml`). The same endpoint also receives the per-shop `app/uninstalled` subscription the callback registers. |
 | Scopes | App configuration must include the scopes in `SHOPIFY_SCOPES` (default `read_products,read_inventory,read_locations,read_orders`, comma separated). |
 
 Protected customer data access is a separate approval in the Partner dashboard and is **not** requested in 1b-2: no customer scopes are asked for and no customer PII is stored. For the same reason 1b-2 subscribes each shop to `app/uninstalled` only (`SHOPIFY_WEBHOOK_TOPICS`); the order, refund, product and stock topics (`SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS`) carry customer data, likely need that approval, and are subscribed in 1b-3 together with their consumption.
@@ -55,13 +65,13 @@ Could not confirm: where exactly in the current Dev Dashboard UI the redirect UR
 
 | Name | Read by | Required | Effect when missing |
 |---|---|---|---|
-| `API_PUBLIC_URL` | API | optional | Shopify is disabled (config is null). Public base URL of the API, used for the redirect and webhook URLs. |
+| `API_PUBLIC_URL` | API | optional | Shopify is disabled (config is null). Public base URL of the API, used for the webhook URL. |
 | `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET` | API | optional | Shopify disabled. |
 | `SHOPIFY_SCOPES` | API | optional | Defaults to the four read scopes above. |
 | `ENCRYPTION_KEY_ID`, `ENCRYPTION_KEY` | API | optional | No key provider: install and callback return `not_configured` or 503. Webhook receiving needs only the Shopify config. |
 | `ENCRYPTION_OLD_KEYS` | API | optional | Retired keys are not available for decrypting old ciphertext. |
 | `REDIS_URL` | API | optional | Events are stored but not enqueued (a no-op queue); the worker sweep processes them after the stale window. |
-| `WEB_PUBLIC_URL` | API | required | Base of the redirect after the callback. |
+| `WEB_PUBLIC_URL` | API | required | Host of the OAuth redirect URI (`${WEB_PUBLIC_URL}/connections/shopify/callback`) and base of the redirect after the callback. |
 | `SHOPIFY_API_VERSION` | not an env var | n/a | The version is the constant `SHOPIFY_API_VERSION` in `packages/connectors/src/shopify/config.ts` (currently `2025-07`). Review it when upgrading. |
 
 All keys are listed with empty placeholders in `.env.example`. An empty value is treated as unset. With Shopify unconfigured the app still boots; the install route returns 503 `shopify_not_configured`.
@@ -73,17 +83,19 @@ All keys are listed with empty placeholders in `.env.example`. An empty value is
 | `POST /orgs/:orgId/connections/shopify/install` | AuthGuard, OrgGuard, RolesGuard (admin and up) | Body `{ shop }`, normalized (trim, lowercase) and validated (one DNS label under `myshopify.com`). 400 `invalid_shop` (400 `validation_failed` for an empty body value), 503 `shopify_not_configured` when the Shopify config or the encryption key is missing, so the merchant is never sent to consent first. Returns `{ authorizeUrl }`. Lazily deletes the org's expired states. |
 | `GET /orgs/:orgId/connections` | any member | id, platform, shop, status, `lastSyncedAt`, `lastError`. Never credentials. |
 | `POST /orgs/:orgId/connections/:id/disconnect` | admin and up | Status `disconnected`, token wiped, audit row. 404 `connection_not_found`. Never deletes the row. |
-| `GET /connections/shopify/callback` | public: query HMAC plus single-use state | Always redirects, never throws. |
-| `POST /webhooks/shopify` | public: HMAC over the raw body | 200 for stored, duplicate and unknown shop; 401 `invalid_signature`; 400 `bad_request` for malformed JSON (body-parser rejects it before the HMAC check, so the receiver's own `invalid_payload` code is unreachable); 503 `shopify_not_configured`. Answers within about 2 s even when Redis is down (the enqueue is capped; the row stays `received` for the sweep). |
+| `POST /connections/shopify/callback` | AuthGuard only (no org in the path) | Body `{ query }`: the raw, still-encoded query string Shopify sent (1 to 4096 chars). Returns `{ redirectTo }`, never throws a Shopify error. Called by the web route, never by Shopify. The old public `GET /connections/shopify/callback` no longer exists. |
+| `POST /webhooks/shopify` | public: HMAC over the raw body (the only public Shopify route, `ShopifyPublicController`) | 200 for stored, duplicate and unknown shop; 401 `invalid_signature`; 400 `bad_request` for malformed JSON (body-parser rejects it before the HMAC check, so the receiver's own `invalid_payload` code is unreachable); 503 `shopify_not_configured`. Answers within about 2 s even when Redis is down (the enqueue is capped; the row stays `received` for the sweep). |
 
-Callback error codes (`?shopify_error=`), all fixed strings:
+Callback result codes (`?shopify_error=`), the nine `SHOPIFY_ERROR_CODES` in `packages/shared`, all fixed strings. The web route whitelists them and builds the `/connections?...` path itself, never trusting the API's URL:
 
 | Code | Meaning |
 |---|---|
-| `invalid_request` | Bad or missing query HMAC, stale timestamp, missing code, state or shop, or an invalid shop domain. |
+| `invalid_request` | Bad or missing query HMAC (see Signature below), stale timestamp, missing code, state or shop, or an invalid shop domain. |
 | `state_expired` | State unknown, already used or older than 10 minutes. |
-| `shop_mismatch` | The shop in the callback differs from the shop the state was created for. |
-| `shop_in_use` | The shop is actively connected (not disconnected) to a different org. |
+| `wrong_account` | The signed-in user is not the user who started the install. The state is burned. |
+| `not_allowed` | The user who started the install is no longer an owner or admin of the state's org (the role is checked as it is now). The state is burned. |
+| `shop_mismatch` | The shop in the callback differs from the shop the state was created for. The state is burned. |
+| `shop_in_use` | The shop is actively connected (not disconnected) to a different org, found by the pre-check or by the unique index when two orgs race (see section 8). |
 | `exchange_failed` | Any failure of the token exchange (rejected code, 401 or 403, rate limit, 5xx, network, unreadable response). The user sees one message; internally a 401 or 403 is an `AuthError`, 429 a `RateLimitedError`, 5xx a `TransientError`, other statuses a `PermanentError`. |
 | `not_configured` | Shopify or the encryption key is not configured. |
 | `server_error` | Anything unexpected (logged with a sanitized message). |
@@ -92,24 +104,29 @@ Callback error codes (`?shopify_error=`), all fixed strings:
 
 Token exchange: the request to `https://<shop>/admin/oauth/access_token` is sent as `application/x-www-form-urlencoded` with `client_id`, `client_secret` and `code` (Shopify's documented format), not JSON. Redirects are never followed and the shop is validated before any URL is built.
 
+### Signature of the OAuth redirect
+
+`verifyOAuthRawQuery` (`packages/connectors/src/shopify/hmac.ts`) verifies the hex HMAC over the raw query string, sorted by key without `hmac`. Shopify's docs do not say whether the signed message uses the encoded or the decoded values, so BOTH are accepted until the first real install shows which one Shopify uses; then drop the other. The decoded form is accepted only when no decoded key or value contains `&` and no key contains `=` (otherwise `a=1&b=2` and `a=1%26b%3D2` would sign identically, a parameter-smuggling ambiguity), so only the encoded form can match then. Rejected outright: repeated keys, malformed percent escapes, a pair without a key, an empty query, a query over 4096 characters, a missing or non-hex `hmac`. The timestamp must be an integer at most 600 seconds in the past and at most 60 seconds in the future.
+
 ### Request body parsing
 
-`configureApp` mounts a 2mb JSON parser on `/webhooks/shopify` and a 100kb parser everywhere else; both capture `req.rawBody`, which the HMAC is computed over. Nest's own body parsers are off (`bodyParser: false`), so urlencoded bodies are no longer parsed; add a urlencoded parser in `configureApp` if a form endpoint appears. The exception filter maps body-parser 4xx errors instead of returning 500: 413 `payload_too_large`, and malformed JSON as 400 `bad_request`.
+`configureApp` mounts a 2mb JSON parser on `/webhooks/shopify` and a 100kb parser everywhere else; both capture `req.rawBody`, which the HMAC is computed over. Nest's own body parsers are off (`bodyParser: false`), so urlencoded bodies are no longer parsed; add a urlencoded parser in `configureApp` if a form endpoint appears. An Express error middleware in `configureApp` (`apps/api/src/app.config.ts`) answers malformed JSON on EVERY JSON route with 400 `bad_request` and the fixed message `Invalid request body` (Nest would otherwise quote a fragment of the caller's body); the exception filter still maps 413 to `payload_too_large`.
 
 ## 5. Webhooks
 
 - **Verification:** base64 HMAC-SHA256 of the raw bytes with the app secret, constant-time compare, malformed or missing header rejected. A verified request additionally needs valid `X-Shopify-Topic`, `X-Shopify-Webhook-Id` and a valid `X-Shopify-Shop-Domain`; otherwise 401.
 - **Dedupe key:** `(org_id, store_connection_id, external_event_id)` where `external_event_id` is `X-Shopify-Webhook-Id`. A second delivery returns 200 and stores nothing.
 - **Why events for disconnected connections are still stored:** `app_find_store_connection` returns any row for the shop, preferring a non-disconnected one. Shopify sends `app/uninstalled` and `shop/redact` after the connection is already disconnected; they must still be recorded and acted on. Only a shop with no connection row at all is acknowledged and dropped (logged without payload).
-- **Statuses:** `received` (stored), `processing` (claimed by a worker), `processed`, `failed` (error text sanitized, job rethrown so BullMQ retries), `ignored` (unknown topic), `deferred` (data topic parked for 1b-3, payload emptied).
+- **Statuses:** `received` (stored), `processing` (claimed by a worker), `processed`, `failed` (error text sanitized, job rethrown so BullMQ retries), `ignored` (unknown topic), `deferred` (data topic parked for 1b-3).
 - **Per topic (worker):**
   - `app/uninstalled`: connection set to `disconnected`, token wiped, audit `connection.uninstalled`, event `processed`.
   - `customers/data_request`, `customers/redact`: we hold no customer PII, so an audit row `privacy.request_recorded` (topic only, never the payload) is written and the event is `processed`.
-  - `shop/redact`: calls `app_purge_store_connection` (section 7). The event row is deleted with the connection, so nothing is marked afterwards.
-  - `orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`, `products/create|update|delete`, `inventory_levels/update`: not subscribed in 1b-2. If one arrives anyway it is marked `deferred` and its stored `payload` is replaced with `{}`, so no customer data is retained.
+  - `shop/redact`: looks up the event's connection and calls `app_purge_shop(platform, shop)` (section 7), which purges every disconnected or errored connection of the shop in every org. The event row normally goes with the cascade; if an active reinstall owns the shop, the event is closed as `processed`.
+  - `orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`, `products/create|update|delete`, `inventory_levels/update`: not subscribed in 1b-2. If one arrives anyway it is marked `deferred`. The stored payload is `{}` already, because the receiver never stores a body.
   - Anything else: `ignored`.
 - **Claim and reclaim:** the claim (`received` or `failed` to `processing`) commits before the work, so a `shop/redact` purge, whose cascade deletes the event row, never waits on our own row lock. A `processing` event whose `updated_at` is older than `STALE_EVENT_MS` (10 minutes) can be claimed again by another worker.
 - **Stale-event sweep:** every 5 minutes (`scheduleWebhookSweep`) the worker calls `app_list_stale_webhook_events`, which returns `received` events older than the cutoff and `processing` events whose `updated_at` is older than the cutoff (migration 0016), and re-enqueues them. Each sweep window uses a time-bucketed job id suffix (`_r<bucket>`) so a retained finished job never swallows the retry; double processing is safe because the claim is atomic.
+- **Payloads:** the receiver verifies the HMAC, checks the body is valid JSON and discards it; `webhook_events.payload` is `{}` for every topic. Migration 0019 scrubbed rows stored before this. The worker never needs a body (it fetches data from Shopify when 1b-3 needs it). The sweep is supported by index `webhook_events_status_updated_idx` on `(status, updated_at)`.
 - **Queue:** job data is only `{ orgId, eventId }`; job id `<orgId>_<eventId>`, 5 attempts, exponential backoff from 5 s.
 
 ## 6. Credentials
@@ -118,30 +135,30 @@ The token is stored in `store_connections.encrypted_credentials` as AES-256-GCM 
 
 ## 7. Privacy and data removal
 
-Held: connection metadata (shop domain, scopes, status, errors), encrypted token, hashed OAuth states, and webhook payloads (tenant data under RLS, never logged). No customer PII is stored in 1b-2: no data topics are subscribed, and a data-topic event that arrives anyway keeps only `{}` once the worker defers it.
+Held: connection metadata (shop domain, scopes, status, errors), encrypted token, hashed OAuth states, and webhook event rows (topic, ids, status; the payload is always `{}`). No customer PII is stored in 1b-2: no data topics are subscribed and no webhook body is ever persisted.
 
-`shop/redact` runs `app_purge_store_connection(org_id, connection_id)` (SECURITY DEFINER, worker only). It deletes the connection's inventory movements (the one intended path that removes ledger rows), sync runs, the shop's oauth states, and the connection row, which cascades to locations, levels, listings, orders, lines, refunds, cursors and webhook events. It does not delete the org's catalog (products, SKUs) or cost data. It writes an audit row `store_connection.purged` (reason `shop_redact`). Uninstall and privacy requests also write audit rows (`connection.uninstalled`, `privacy.request_recorded`).
+`shop/redact` runs `app_purge_shop(platform, shop)` (migrations 0017 and 0018; SECURITY DEFINER, worker only). It selects every connection of that platform and shop in every org whose status is `disconnected` or `error`, locking the rows `FOR UPDATE` (a concurrent reinstall cannot be purged; the status is re-checked per row), and calls `app_purge_store_connection` for each. It never touches an `active`, `pending` or `demo` connection, and returns the number purged. For each connection that deletes the inventory movements (the one intended path that removes ledger rows), sync runs, the shop's oauth states (filtered by org, platform and shop), and the connection row, which cascades to locations, levels, listings, orders, lines, refunds, cursors and webhook events. It does not delete the org's catalog (products, SKUs) or cost data. It writes one audit row `store_connection.purged` (reason `shop_redact`) per org purged. Uninstall and privacy requests also write audit rows (`connection.uninstalled`, `privacy.request_recorded`, topic only).
 
 ## 8. Known gaps
 
-### Hard gates
+### Resolved in 1b-3a
 
-- **GATE before any real Shopify app or merchant is connected (OAuth callback not bound to the browser).** The OAuth state is bound to org, user and shop but not to the browser that completes the callback. An org admin could mint an authorize URL for a victim's shop and get the victim to complete it, connecting the victim's shop to the attacker's org (blocked only while the victim's own org has a non-disconnected connection). Planned fix: route the callback through the web app (a Next route handler with the Supabase session) to an authenticated API endpoint that requires `jwt.sub === consumed.userId` and a current admin or owner role on `consumed.orgId`; or set an HttpOnly SameSite=Lax nonce cookie at install and require it in the callback.
-- **GATE before 1b-3 ingests orders (`shop/redact` covers one connection).** `shop/redact` purges only the connection returned by `app_find_store_connection` (one row). A shop reconnected from another org can leave a disconnected connection in org A and another in org B, so the purge must cover every disconnected connection of that platform and shop across orgs: a new migration `app_purge_shop(platform, shop)` with one audit row per org, folding in an `oauth_states` platform filter and a `(status, updated_at)` partial index on `webhook_events`.
+- The OAuth callback is bound to the user who started the install and their current role (authenticated callback through the web session).
+- `shop/redact` purges every non-active connection of the shop across orgs (`app_purge_shop`).
+- Webhook payloads are never retained (section 5).
+- One non-disconnected connection per shop across all orgs is a database invariant: unique index `store_connections_active_shop_uq` on `(platform, external_account_id) WHERE status NOT IN ('disconnected', 'demo')` (migration 0020; the preflight migration 0019 aborts if existing rows already break it). It is cross-org by design. A violation in the callback upsert maps to `shop_in_use`, so a race ends with exactly one winner. Any org may reconnect a shop once its previous connection is `disconnected`; until `shop/redact` purges it, a disconnected row can coexist with the new one (webhook lookup prefers the non-disconnected one).
 
-### Other open items
+### Open items
 
-- `shop_in_use` is check-then-act (see below); a partial unique index on `(platform, external_account_id) WHERE status <> 'disconnected'` is planned together with the OAuth callback fix.
-- **OAuth query HMAC over decoded values.** The HMAC is computed over Express's decoded query values, while Shopify signs the raw encoded query string. This matters for values such as `host` that can contain `=`. Verify on the first real install and consider computing the HMAC over the raw query taken from `req.originalUrl`.
+- **OAuth signature form.** Both the encoded and decoded signed forms are accepted (section 4); verify on the first real install and drop one.
 - **Failed events are never swept.** Events that end `failed` after 5 BullMQ attempts are not picked up by the sweep, including privacy topics. Sweep or alert on them before 1b-3.
-- **Shared database role.** The API and the worker share the `app_user` role, which can execute `app_purge_store_connection`. Consider a separate worker role later.
+- **Shared database role.** The API and the worker share the `app_user` role, which can execute `app_purge_store_connection` and `app_purge_shop`. Consider a separate worker role later.
 
 - **Nothing has run against real Shopify.** All behaviour is verified against `fake-shopify` and `signing` test helpers only.
 - **Expiring offline tokens (refresh deferred to 1b-3).** Shopify can issue expiring offline access tokens plus a refresh token to new public apps (the `expiring=1` flow). 1b-2 stores only `{ accessToken }`, does not request expiring tokens and has no refresh. If Shopify issues an expiring token anyway, syncs will fail with an auth error after expiry until refresh exists.
 - **Webhook subscription GraphQL not verified.** The `webhookSubscriptionCreate` mutation (`URL!` variable type, `format: JSON`, topic enum names derived as `ORDERS_CREATE` and so on) was not independently verified against the live docs. Check it against a real shop in 1b-3.
-- **`shop_in_use` is check-then-act.** A shop can be actively connected to only one org, enforced by a lookup in the callback; there is no unique index, so two orgs completing OAuth for the same shop at the same moment could both succeed. Webhooks resolve to one of them.
-- Reconnecting: the upsert targets `(org, platform, shop)`, so the same org reuses its row. Another org is refused with `shop_in_use` only while the existing row is not `disconnected`; a disconnected row of another org does not block a new connection, and until it is purged two rows can exist for the shop (webhook lookup prefers the non-disconnected one).
+- **Callback edges.** A 401 from the API for a user whose web session still looks valid (for example an expired access token) bounces the user to the dashboard and loses the callback; the user restarts the connection. The web callback route sets `Referrer-Policy: no-referrer` on its redirects, because the query carries the code, state and signature.
 - No reconnect reminder emails.
 - The Redis queue, worker and sweep tests are skipped without Docker and are unverified until CI. The web page's pure helpers are unit-tested; the Playwright test only covers the guided empty page and error-text safety, not a real connect, and phone-width layout is unchecked.
 - API version is pinned in `SHOPIFY_API_VERSION` (`packages/connectors/src/shopify/config.ts`).
-- Embedded Postgres test cleanup: `startTestDatabase()` in embedded mode stops the server and removes the directory on stop, process exit and SIGINT/SIGTERM. The orphan `io_worker` processes seen on Windows came from `taskkill /T` killing children while the postmaster was alive: it entered crash recovery and respawned auxiliary processes outside taskkill's snapshot. The helper now kills the postmaster alone first, waits for it, then kills its `postgres.exe` children by parent pid (created after the server's start, so a reused pid is never hit), with a data-directory sweep as a fallback; every external command has a 20 s timeout, and the cleanup test re-queries descendants after the stop. Verified on Windows with three full `@erq/db` runs and three single-file runs, zero leftover processes each time. The POSIX paths (SIGQUIT, which makes the postmaster kill its own children) remain unverified until CI.
+- Embedded Postgres test cleanup: `startTestDatabase()` in embedded mode stops the server and removes the directory on stop, process exit and SIGINT/SIGTERM. The orphan `io_worker` processes seen on Windows came from `taskkill /T` killing children while the postmaster was alive: it entered crash recovery and respawned auxiliary processes outside taskkill's snapshot. The helper now kills the postmaster alone first, waits for it, then kills its `postgres.exe` children by parent pid (created after the server's start, so a reused pid is never hit), with a data-directory sweep as a fallback; every external command has a 20 s timeout, and the cleanup test re-queries descendants after the stop. In embedded mode the helper now captures the postmaster's exact creation time after start and only kills a pid whose current creation time equals it (the pid-reuse guard on Windows); the kill order is postmaster first, then its children. Verified on Windows with repeated `@erq/db` runs, zero leftover processes. The POSIX paths (SIGQUIT, which makes the postmaster kill its own children) remain unverified until CI.

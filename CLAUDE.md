@@ -468,8 +468,9 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - Apps must never import `@erq/db/admin` (ESLint enforces this).
 - Sync sinks must be idempotent and respect `external_updated_at` (an older update never overwrites newer data). A sync cursor never advances without its data: both commit in the same transaction. Connectors never touch the database.
 - Connection credentials are encrypted with AAD `connection:<id>` and never travel in job data. `app_list_stalled_sync_cursors` is the only intentional cross-tenant read; never expose it through an API route.
-- Webhook endpoints verify the HMAC over the raw body and are idempotent. Public routes (`/connections/shopify/callback`, `/webhooks/shopify`) never trust the query or body for org or user.
-- The four 1b-2 SECURITY DEFINER functions (`app_consume_oauth_state`, `app_find_store_connection`, `app_list_stale_webhook_events`, `app_purge_store_connection`) are never exposed through authenticated routes. Stored error text goes through `sanitizeMessage`. Disconnecting is a status change, never a row delete (only `shop/redact` purges).
+- Webhook endpoints verify the HMAC over the raw body and are idempotent. The only public Shopify route is the webhook receiver (`POST /webhooks/shopify`); it never trusts the body for org or user, and webhook bodies are never persisted (payload is always `{}`).
+- The OAuth callback is authenticated (`POST /connections/shopify/callback`, reached through the web route): it requires the signed-in user to be the one who started the install and a current owner or admin of the state's org, and the org never comes from the session.
+- `app_purge_shop` is worker-only. The SECURITY DEFINER functions `app_consume_oauth_state`, `app_find_store_connection`, `app_list_stale_webhook_events`, `app_purge_store_connection` and `app_purge_shop` are never exposed through generic authenticated routes. Stored error text goes through `sanitizeMessage`. Disconnecting is a status change, never a row delete (only `shop/redact` purges).
 - Post-login redirects go through `safeNextPath`. Do not build redirect targets from user input any other way.
 - New API controllers must apply `AuthGuard`, `OrgGuard`, `RolesGuard` in that order on every route; guards are not global yet.
 
@@ -477,15 +478,13 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 **Not yet verified by running:** the Redis rate limiter, the BullMQ sync queue and the sync worker (no Redis or Docker in dev), the BullMQ system-worker test, the Playwright e2e, live Supabase login and middleware flows, the seed CLI, and the CI workflow. The first CI run with Docker is their first execution. Also unverified (1b-2): everything against real Shopify, the BullMQ webhook queue, worker and sweep, and the Playwright connect test.
 
-**Known open items (hard gates first, details in docs/shopify-connection.md section 8):**
-- GATE before any real Shopify app or merchant is connected: the OAuth state is bound to org, user and shop but not to the browser completing the callback, so an org admin could get a victim to complete an authorize URL for the victim's shop and connect it to the admin's org. Fix: route the callback through the web app to an authenticated API endpoint that requires `jwt.sub === consumed.userId` and a current admin/owner role on `consumed.orgId`, or bind an HttpOnly SameSite=Lax nonce cookie at install.
-- GATE before 1b-3 ingests orders: `shop/redact` purges only the one connection `app_find_store_connection` returns; it must purge every disconnected connection of that platform and shop across orgs (new migration `app_purge_shop(platform, shop)` with one audit row per org, plus the `oauth_states` platform filter and a `(status, updated_at)` partial index on `webhook_events`).
-- `shop_in_use` is check-then-act; a partial unique index on `(platform, external_account_id) WHERE status <> 'disconnected'` is planned with the OAuth fix.
-- The OAuth query HMAC is computed over Express's decoded values while Shopify signs the raw query string; verify on the first real install and consider HMAC over the raw query from `req.originalUrl`.
+**Known open items (details in docs/shopify-connection.md section 8):**
+- The OAuth redirect signature is accepted in both the encoded and the decoded signed form; verify on the first real install and drop one.
 - Webhook events that end `failed` after 5 BullMQ attempts are never swept (privacy topics included): sweep or alert before 1b-3.
-- The API and worker share `app_user`, which can execute `app_purge_store_connection`; consider a separate worker role.
-- Shopify token refresh (expiring offline tokens) is deferred to 1b-3.
-- Embedded Postgres test cleanup: the orphan `io_worker` leak was caused by `taskkill /T` killing children while the postmaster lived (crash recovery respawned them); fixed by killing the postmaster alone first, then its children by parent pid. Verified on Windows (three full `@erq/db` runs and three single-file runs with zero leftover processes); POSIX paths remain unverified until CI.
+- The API and worker share `app_user`, which can execute `app_purge_store_connection` and `app_purge_shop`; consider a separate worker role.
+- Shopify token refresh (expiring offline tokens) is deferred to 1b-3. The webhook subscription GraphQL details are unverified against real Shopify.
+- Edge: a 401 from the API for a user whose web session still looks valid bounces to the dashboard and loses the OAuth callback (the user restarts the connection).
+- Embedded Postgres test cleanup: the orphan `io_worker` leak was caused by `taskkill /T` killing children while the postmaster lived (crash recovery respawned them); fixed by killing the postmaster alone first, then its children by parent pid. Verified on Windows (three full `@erq/db` runs and three single-file runs with zero leftover processes); the helper now also guards pid kills by the postmaster's exact creation time. POSIX paths remain unverified until CI. Other packages load `@erq/db/testing` from `dist`: run `pnpm turbo run build --filter=@erq/db` before running their tests directly.
 
 **Known deferred items:** global deny-by-default guard, `money(-0)` handling and extra money tests (Phase 1a), Swagger gating in production, worker shutdown robustness, UX polish on the web pages, and the seed slug `demo` colliding with a real org named "Demo".
 
@@ -526,3 +525,8 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - 2026-10-07: `shop/redact` purges the connection's data through the SECURITY DEFINER function `app_purge_store_connection`; the org's catalog and costs are kept.
 - 2026-10-07: A shop can be actively connected to only one org (check-then-act in the callback, no unique index yet).
 - 2026-10-07: Only the read-only scopes 1b-3 needs are requested (`read_products`, `read_inventory`, `read_locations`, `read_orders`); protected customer data is not requested.
+- 2026-10-08: The Shopify OAuth callback moved behind the web session: Shopify redirects to `${WEB_PUBLIC_URL}/connections/shopify/callback`, which forwards the raw query to the authenticated `POST /connections/shopify/callback`. The caller must be the user who started the install and a current owner or admin of the state's org. The public callback route is removed.
+- 2026-10-08: `shop/redact` purges every disconnected or errored connection of the shop across all orgs (`app_purge_shop`, worker only), never an active one.
+- 2026-10-08: Webhook bodies are never stored (payload is always `{}`); rows stored earlier were scrubbed by migration 0019.
+- 2026-10-08: One active org per shop is a database invariant (unique index `store_connections_active_shop_uq`), replacing the check-then-act lookup; a race ends as `shop_in_use`.
+- 2026-10-08: Phase 1b-3 is split into 1b-3a hardening, 1b-3b Shopify connector, 1b-3c live updates.

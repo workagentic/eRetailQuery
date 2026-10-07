@@ -51,7 +51,8 @@ beforeAll(async () => {
   await owner.query(
     `insert into oauth_states (org_id, user_id, platform, shop, nonce_hash, expires_at) values
        ($1, gen_random_uuid(), 'shopify', 'shop-' || ($1::uuid)::text, 'hash-purged-shop', now() + interval '10 minutes'),
-       ($1, gen_random_uuid(), 'shopify', 'second.myshopify.com', 'hash-second-shop', now() + interval '10 minutes')`,
+       ($1, gen_random_uuid(), 'shopify', 'second.myshopify.com', 'hash-second-shop', now() + interval '10 minutes'),
+       ($1, gen_random_uuid(), 'woocommerce', 'shop-' || ($1::uuid)::text, 'hash-woo-same-name', now() + interval '10 minutes')`,
     [A],
   );
   // The fixture sync_run points at a random connection id; add one that really belongs to each connection.
@@ -93,8 +94,20 @@ describe('app_purge_store_connection', () => {
     expect(await count('orders', `store_connection_id = $1`, [A2])).toBe(1);
     // only the purged shop's OAuth states go; the org's other shops keep theirs
     expect(
-      await count('oauth_states', `org_id = $1 and shop = 'shop-' || ($1::uuid)::text`, [A]),
+      await count(
+        'oauth_states',
+        `org_id = $1 and platform = 'shopify' and shop = 'shop-' || ($1::uuid)::text`,
+        [A],
+      ),
     ).toBe(0);
+    // a state on another platform with the same shop name survives the platform-filtered delete
+    expect(
+      await count(
+        'oauth_states',
+        `org_id = $1 and platform = 'woocommerce' and shop = 'shop-' || ($1::uuid)::text`,
+        [A],
+      ),
+    ).toBe(1);
     expect(await count('oauth_states', `org_id = $1 and shop = 'second.myshopify.com'`, [A])).toBe(
       1,
     );

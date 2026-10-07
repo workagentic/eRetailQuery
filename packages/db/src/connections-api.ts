@@ -23,6 +23,8 @@ export interface ConnectionsApi {
   ): Promise<{ orgId: string; eventId: string }[]>;
   /** Used only by the worker's shop/redact handler. Never expose through a route. */
   purgeStoreConnection(orgId: string, connectionId: string): Promise<void>;
+  /** Used only by the worker's shop/redact handler. Purges every disconnected or errored connection of the shop in every org; never an active one. Returns how many. */
+  purgeShop(platform: StorePlatformName, externalAccountId: string): Promise<number>;
 }
 
 /** Wrappers for the SECURITY DEFINER functions that run before any org context exists. Never expose these through a route. */
@@ -57,6 +59,13 @@ export function createConnectionsApi(pool: Pool): ConnectionsApi {
     },
     async purgeStoreConnection(orgId, connectionId) {
       await pool.query('select app_purge_store_connection($1, $2)', [orgId, connectionId]);
+    },
+    async purgeShop(platform, externalAccountId) {
+      const { rows } = await pool.query<{ n: number }>(
+        'select app_purge_shop($1::store_platform, $2) as n',
+        [platform, externalAccountId],
+      );
+      return rows[0]?.n ?? 0;
     },
   };
 }

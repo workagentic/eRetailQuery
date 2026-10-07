@@ -11,6 +11,9 @@ const ERROR_MESSAGES: Record<string, string> = {
   exchange_failed: 'Shopify did not accept the connection. Please try again.',
   not_configured: 'Shopify connections are not set up on this server yet.',
   server_error: GENERIC_ERROR,
+  wrong_account:
+    'This connection was started from a different account. Sign in with the account that started it, or start again.',
+  not_allowed: 'Only an owner or admin can connect a store.',
 };
 
 export function shopifyErrorMessage(code: string | undefined): string | null {

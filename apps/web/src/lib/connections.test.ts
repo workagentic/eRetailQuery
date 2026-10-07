@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import type { ConnectionDto } from '@erq/shared';
+import { SHOPIFY_ERROR_CODES, type ConnectionDto } from '@erq/shared';
 import {
   connectionsErrorMessage,
   describeConnection,
@@ -22,15 +22,7 @@ const conn = (over: Partial<ConnectionDto> = {}): ConnectionDto => ({
 
 describe('shopifyErrorMessage', () => {
   it('returns plain English for every known code and a generic message for unknown ones', () => {
-    for (const code of [
-      'invalid_request',
-      'state_expired',
-      'shop_mismatch',
-      'shop_in_use',
-      'exchange_failed',
-      'not_configured',
-      'server_error',
-    ]) {
+    for (const code of SHOPIFY_ERROR_CODES) {
       const m = shopifyErrorMessage(code)!;
       expect(m.length).toBeGreaterThan(10);
       expect(m).not.toContain(code);
@@ -41,6 +33,12 @@ describe('shopifyErrorMessage', () => {
     expect(shopifyErrorMessage('<script>alert(1)</script>')).not.toContain('<script>');
     expect(shopifyErrorMessage('constructor')).toBe(shopifyErrorMessage('something_else'));
     expect(shopifyErrorMessage(undefined)).toBeNull();
+  });
+  it('has exact messages for the account-binding codes', () => {
+    expect(shopifyErrorMessage('wrong_account')).toBe(
+      'This connection was started from a different account. Sign in with the account that started it, or start again.',
+    );
+    expect(shopifyErrorMessage('not_allowed')).toBe('Only an owner or admin can connect a store.');
   });
   it('explains the webhook warning', () => {
     expect(shopifyWarningMessage('webhooks')).toMatch(/Reconnect/);

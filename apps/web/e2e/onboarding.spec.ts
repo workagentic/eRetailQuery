@@ -59,3 +59,13 @@ test('the Connections page guides a new owner and never echoes query text', asyn
   await page.goto('/connections?shopify=connected');
   await expect(page.getByRole('status').filter({ hasText: 'connected' })).toBeVisible();
 });
+
+// Unverified locally: needs the API, Supabase and a browser (runs in CI).
+test('a signed-out Shopify callback goes to login and keeps its query for the way back', async ({
+  page,
+}) => {
+  await page.goto('/connections/shopify/callback?code=x&state=y&hmac=z');
+  await expect(page).toHaveURL(/\/login\?next=/);
+  const next = new URL(page.url()).searchParams.get('next');
+  expect(next).toBe('/connections/shopify/callback?code=x&state=y&hmac=z');
+});

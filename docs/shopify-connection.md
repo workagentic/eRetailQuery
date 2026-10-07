@@ -22,7 +22,7 @@ Callback (authenticated, through the web app)
        5. consumed.userId must equal the signed-in user        -> else wrong_account
        6. the user must CURRENTLY be owner or admin of the state's org (the org comes from the state, never the session) -> else not_allowed
        7. shop must equal the shop bound to the state          -> else shop_mismatch
-       8. shop_in_use pre-check (active in another org)        -> else shop_in_use
+       8. shop_in_use pre-check (any non-disconnected, non-demo connection in another org, so error and pending count) -> else shop_in_use
        9. exchange code for token (form-urlencoded POST, no db transaction open) -> else exchange_failed
       10. withTenant(orgId): upsert store_connections (active), store encrypted token, audit row;
           a unique violation on store_connections_active_shop_uq -> shop_in_use
@@ -95,7 +95,7 @@ Callback result codes (`?shopify_error=`), the nine `SHOPIFY_ERROR_CODES` in `pa
 | `wrong_account` | The signed-in user is not the user who started the install. The state is burned. |
 | `not_allowed` | The user who started the install is no longer an owner or admin of the state's org (the role is checked as it is now). The state is burned. |
 | `shop_mismatch` | The shop in the callback differs from the shop the state was created for. The state is burned. |
-| `shop_in_use` | The shop is actively connected (not disconnected) to a different org, found by the pre-check or by the unique index when two orgs race (see section 8). |
+| `shop_in_use` | The shop has any non-disconnected, non-demo connection (`active`, `pending` or `error`) in a different org, found by the pre-check or by the unique index when two orgs race (see section 8). |
 | `exchange_failed` | Any failure of the token exchange (rejected code, 401 or 403, rate limit, 5xx, network, unreadable response). The user sees one message; internally a 401 or 403 is an `AuthError`, 429 a `RateLimitedError`, 5xx a `TransientError`, other statuses a `PermanentError`. |
 | `not_configured` | Shopify or the encryption key is not configured. |
 | `server_error` | Anything unexpected (logged with a sanitized message). |
@@ -146,16 +146,17 @@ Held: connection metadata (shop domain, scopes, status, errors), encrypted token
 - The OAuth callback is bound to the user who started the install and their current role (authenticated callback through the web session).
 - `shop/redact` purges every non-active connection of the shop across orgs (`app_purge_shop`).
 - Webhook payloads are never retained (section 5).
-- One non-disconnected connection per shop across all orgs is a database invariant: unique index `store_connections_active_shop_uq` on `(platform, external_account_id) WHERE status NOT IN ('disconnected', 'demo')` (migration 0020; the preflight migration 0019 aborts if existing rows already break it). It is cross-org by design. A violation in the callback upsert maps to `shop_in_use`, so a race ends with exactly one winner. Any org may reconnect a shop once its previous connection is `disconnected`; until `shop/redact` purges it, a disconnected row can coexist with the new one (webhook lookup prefers the non-disconnected one).
+- One non-disconnected connection per shop across all orgs is a database invariant: unique index `store_connections_active_shop_uq` on `(platform, external_account_id) WHERE status NOT IN ('disconnected', 'demo')` (migration 0020; the preflight migration 0019 aborts if existing rows already break it). It is cross-org by design. A violation in the callback upsert maps to `shop_in_use`, so a race ends with exactly one winner. An errored connection in another org therefore blocks a reconnect until it is disconnected or purged. Any org may reconnect a shop once its previous connection is `disconnected`; until `shop/redact` purges it, a disconnected row can coexist with the new one (webhook lookup prefers the non-disconnected one).
 
 ### Open items
 
 - **OAuth signature form.** Both the encoded and decoded signed forms are accepted (section 4); verify on the first real install and drop one.
-- **Failed events are never swept.** Events that end `failed` after 5 BullMQ attempts are not picked up by the sweep, including privacy topics. Sweep or alert on them before 1b-3.
+- **Failed events are never swept.** Events that end `failed` after 5 BullMQ attempts are not picked up by the sweep, including privacy topics. Sweep or alert on them before 1b-3b ingests data.
+- **A lost `app/uninstalled` leaves the connection active.** If `app/uninstalled` exhausts its retries, the connection stays `active`, so a later `shop/redact` purges nothing (`app_purge_shop` never touches an active connection). The worker then still closes the event as `processed` but writes the audit row `privacy.shop_redact_skipped` (topic and purged count only) on the event's connection; treat that row as a mandatory erasure request that needs manual follow-up. The same row is written when the event's own connection survives the purge (an active reinstall owns the shop). When another org's disconnected row is the one purged, the `shop/redact` event itself lands in the active org's `webhook_events` (topic and ids only, no payload).
 - **Shared database role.** The API and the worker share the `app_user` role, which can execute `app_purge_store_connection` and `app_purge_shop`. Consider a separate worker role later.
 
 - **Nothing has run against real Shopify.** All behaviour is verified against `fake-shopify` and `signing` test helpers only.
-- **Expiring offline tokens (refresh deferred to 1b-3).** Shopify can issue expiring offline access tokens plus a refresh token to new public apps (the `expiring=1` flow). 1b-2 stores only `{ accessToken }`, does not request expiring tokens and has no refresh. If Shopify issues an expiring token anyway, syncs will fail with an auth error after expiry until refresh exists.
+- **Expiring offline tokens (refresh deferred to 1b-3c).** Shopify can issue expiring offline access tokens plus a refresh token to new public apps (the `expiring=1` flow). 1b-2 stores only `{ accessToken }`, does not request expiring tokens and has no refresh. If Shopify issues an expiring token anyway, syncs will fail with an auth error after expiry until refresh exists.
 - **Webhook subscription GraphQL not verified.** The `webhookSubscriptionCreate` mutation (`URL!` variable type, `format: JSON`, topic enum names derived as `ORDERS_CREATE` and so on) was not independently verified against the live docs. Check it against a real shop in 1b-3.
 - **Callback edges.** A 401 from the API for a user whose web session still looks valid (for example an expired access token) bounces the user to the dashboard and loses the callback; the user restarts the connection. The web callback route sets `Referrer-Policy: no-referrer` on its redirects, because the query carries the code, state and signature.
 - No reconnect reminder emails.

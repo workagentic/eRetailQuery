@@ -472,7 +472,7 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - The OAuth callback is authenticated (`POST /connections/shopify/callback`, reached through the web route): it requires the signed-in user to be the one who started the install and a current owner or admin of the state's org, and the org never comes from the session.
 - `app_purge_shop` is worker-only. The SECURITY DEFINER functions `app_consume_oauth_state`, `app_find_store_connection`, `app_list_stale_webhook_events`, `app_purge_store_connection` and `app_purge_shop` are never exposed through generic authenticated routes. Stored error text goes through `sanitizeMessage`. Disconnecting is a status change, never a row delete (only `shop/redact` purges).
 - Post-login redirects go through `safeNextPath`. Do not build redirect targets from user input any other way.
-- New API controllers must apply `AuthGuard`, `OrgGuard`, `RolesGuard` in that order on every route; guards are not global yet.
+- New API controllers must apply `AuthGuard`, `OrgGuard`, `RolesGuard` in that order on every route, except the Shopify OAuth callback (`AuthGuard` only; the org comes from the consumed state) and the public webhook receiver; guards are not global yet.
 
 **Commands:** `pnpm dev`, `pnpm db:migrate`, `pnpm db:seed`, `pnpm test`, `pnpm test:e2e`, `pnpm lint`, `pnpm typecheck`. On small disks run `pnpm turbo run test --concurrency=1`. Tests use Testcontainers when Docker is available, otherwise an embedded Postgres (`ERQ_TEST_DB=docker|embedded|auto`).
 
@@ -480,9 +480,9 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 
 **Known open items (details in docs/shopify-connection.md section 8):**
 - The OAuth redirect signature is accepted in both the encoded and the decoded signed form; verify on the first real install and drop one.
-- Webhook events that end `failed` after 5 BullMQ attempts are never swept (privacy topics included): sweep or alert before 1b-3.
+- Webhook events that end `failed` after 5 BullMQ attempts are never swept (privacy topics included): sweep or alert before 1b-3b ingests data.
 - The API and worker share `app_user`, which can execute `app_purge_store_connection` and `app_purge_shop`; consider a separate worker role.
-- Shopify token refresh (expiring offline tokens) is deferred to 1b-3. The webhook subscription GraphQL details are unverified against real Shopify.
+- Shopify token refresh (expiring offline tokens) is deferred to 1b-3c. The webhook subscription GraphQL details are unverified against real Shopify.
 - Edge: a 401 from the API for a user whose web session still looks valid bounces to the dashboard and loses the OAuth callback (the user restarts the connection).
 - Embedded Postgres test cleanup: the orphan `io_worker` leak was caused by `taskkill /T` killing children while the postmaster lived (crash recovery respawned them); fixed by killing the postmaster alone first, then its children by parent pid. Verified on Windows (three full `@erq/db` runs and three single-file runs with zero leftover processes); the helper now also guards pid kills by the postmaster's exact creation time. POSIX paths remain unverified until CI. Other packages load `@erq/db/testing` from `dist`: run `pnpm turbo run build --filter=@erq/db` before running their tests directly.
 

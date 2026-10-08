@@ -4,6 +4,7 @@ export * from './http';
 export * from './hmac';
 export * from './oauth';
 export * from './token';
+export * from './credentials';
 export * from './webhooks';
 export * from './money';
 export * from './graphql';

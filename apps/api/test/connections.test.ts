@@ -405,8 +405,11 @@ describe('POST /connections/shopify/callback', () => {
         ENCRYPTION_KEY_ID: 'k1',
         ENCRYPTION_KEY: SHOPIFY_ENV.ENCRYPTION_KEY,
       });
-      expect(decryptConnectionCredentials(rows[0].encrypted_credentials, key, rows[0].id)).toEqual({
+      expect(
+        decryptConnectionCredentials(rows[0].encrypted_credentials, key, rows[0].id),
+      ).toMatchObject({
         accessToken: 'shpat_fake_token',
+        refreshToken: 'shprt_fake_refresh',
       });
       expect(() =>
         decryptConnectionCredentials(rows[0].encrypted_credentials, key, randomUUID()),
@@ -424,6 +427,82 @@ describe('POST /connections/shopify/callback', () => {
       ).toEqual([{ actor_user_id: user, after_json: { platform: 'shopify', shop: SHOP } }]);
     },
   );
+
+  it('stores an expiring token set encrypted, mirrors only the expiry times in plain columns, and keeps both tokens out of audit rows, the list and jobs', async () => {
+    const { orgId, h } = await createOrg('Expiring Org');
+    const state = await startInstall(orgId, h);
+    fake.respondNext({
+      status: 200,
+      body: JSON.stringify({
+        access_token: 'shpat_unique_91bb',
+        scope: 'read_orders',
+        expires_in: 3600,
+        refresh_token: 'shprt_unique_91bb',
+        refresh_token_expires_in: 7776000,
+      }),
+    });
+    const before = Date.now();
+    const res = await callbackAs(authOnly(h), rawSigned(state));
+    expect(res.body).toEqual({ redirectTo: connected });
+    const { rows } = await owner.query(
+      `select id, encrypted_credentials, access_token_expires_at, refresh_token_expires_at from store_connections where org_id = $1`,
+      [orgId],
+    );
+    const key = EnvKeyProvider.fromEnv({
+      ENCRYPTION_KEY_ID: 'k1',
+      ENCRYPTION_KEY: SHOPIFY_ENV.ENCRYPTION_KEY,
+    });
+    const creds = decryptConnectionCredentials(
+      rows[0].encrypted_credentials,
+      key,
+      rows[0].id,
+    ) as Record<string, string>;
+    expect(Object.keys(creds).sort()).toEqual([
+      'accessToken',
+      'accessTokenExpiresAt',
+      'refreshToken',
+      'refreshTokenExpiresAt',
+    ]);
+    expect([creds.accessToken, creds.refreshToken]).toEqual([
+      'shpat_unique_91bb',
+      'shprt_unique_91bb',
+    ]);
+    const accessAt = new Date(creds.accessTokenExpiresAt!).getTime();
+    expect(accessAt).toBeGreaterThanOrEqual(before + 3_600_000);
+    expect(accessAt).toBeLessThanOrEqual(Date.now() + 3_600_000);
+    expect(rows[0].access_token_expires_at.toISOString()).toBe(creds.accessTokenExpiresAt);
+    expect(rows[0].refresh_token_expires_at.toISOString()).toBe(creds.refreshTokenExpiresAt);
+    const audit = await owner.query(`select * from audit_log where org_id = $1`, [orgId]);
+    const listed = await request(server()).get(`/orgs/${orgId}/connections`).set(h);
+    const visible = JSON.stringify([rows, audit.rows, listed.body, syncQueue.jobs]);
+    for (const secret of ['shpat_unique_91bb', 'shprt_unique_91bb'])
+      expect(visible).not.toContain(secret);
+  });
+
+  it('stores a non-expiring response as the old shape with empty expiry columns', async () => {
+    const { orgId, h } = await createOrg('Non Expiring Org');
+    const state = await startInstall(orgId, h);
+    fake.respondNext({
+      status: 200,
+      body: JSON.stringify({ access_token: 'shpat_old_77', scope: 'read_orders' }),
+    });
+    await callbackAs(authOnly(h), rawSigned(state));
+    const { rows } = await owner.query(
+      `select id, encrypted_credentials, access_token_expires_at, refresh_token_expires_at from store_connections where org_id = $1`,
+      [orgId],
+    );
+    const key = EnvKeyProvider.fromEnv({
+      ENCRYPTION_KEY_ID: 'k1',
+      ENCRYPTION_KEY: SHOPIFY_ENV.ENCRYPTION_KEY,
+    });
+    expect(decryptConnectionCredentials(rows[0].encrypted_credentials, key, rows[0].id)).toEqual({
+      accessToken: 'shpat_old_77',
+    });
+    expect([rows[0].access_token_expires_at, rows[0].refresh_token_expires_at]).toEqual([
+      null,
+      null,
+    ]);
+  });
 
   it('refuses another account, even an admin of the same org, and burns the state', async () => {
     const { orgId, h } = await createOrg('Wrong Account Org');

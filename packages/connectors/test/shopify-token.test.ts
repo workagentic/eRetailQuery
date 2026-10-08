@@ -11,10 +11,17 @@ import { FakeShopify } from '../src/testing';
 const p = { shop: 'a.myshopify.com', apiKey: 'k', apiSecret: 's3cret', code: 'good-code' };
 
 describe('exchangeCodeForToken', () => {
-  it('returns the token and scopes and sends the documented request', async () => {
-    const http = new FakeShopify({ token: 'shpat_abc', scope: 'read_orders,read_products' });
+  it('asks for an expiring offline token and returns the lifetimes and the refresh token', async () => {
+    const http = new FakeShopify({
+      token: 'shpat_abc',
+      refreshToken: 'shprt_abc',
+      scope: 'read_orders,read_products',
+    });
     await expect(exchangeCodeForToken(http, p)).resolves.toEqual({
       accessToken: 'shpat_abc',
+      accessTokenExpiresInSec: 3600,
+      refreshToken: 'shprt_abc',
+      refreshTokenExpiresInSec: 7776000,
       scopes: ['read_orders', 'read_products'],
     });
     const req = http.requests[0]!;
@@ -25,7 +32,55 @@ describe('exchangeCodeForToken', () => {
       client_id: 'k',
       client_secret: 's3cret',
       code: 'good-code',
+      expiring: '1',
     });
+  });
+  it('treats a response without any expiry field as a non-expiring token', async () => {
+    const http = new FakeShopify();
+    http.respondNext({
+      status: 200,
+      body: JSON.stringify({ access_token: 'shpat_old', scope: 'read_orders' }),
+    });
+    await expect(exchangeCodeForToken(http, p)).resolves.toEqual({
+      accessToken: 'shpat_old',
+      accessTokenExpiresInSec: null,
+      refreshToken: null,
+      refreshTokenExpiresInSec: null,
+      scopes: ['read_orders'],
+    });
+  });
+  it.each([
+    ['only a refresh token', { refresh_token: 'shprt_x' }],
+    ['only a lifetime', { expires_in: 3600 }],
+    ['no refresh lifetime', { expires_in: 3600, refresh_token: 'shprt_x' }],
+    ['a zero lifetime', { expires_in: 0, refresh_token: 'shprt_x', refresh_token_expires_in: 10 }],
+    [
+      'a fractional lifetime',
+      { expires_in: 1.5, refresh_token: 'shprt_x', refresh_token_expires_in: 10 },
+    ],
+  ])(
+    'rejects a partial or invalid expiring set (%s) with a fixed message',
+    async (_name, extra) => {
+      const http = new FakeShopify();
+      http.respondNext({
+        status: 200,
+        body: JSON.stringify({ access_token: 'shpat_secret_value', scope: '', ...extra }),
+      });
+      await expect(exchangeCodeForToken(http, p)).rejects.toMatchObject({
+        name: 'PermanentError',
+        message: 'Shopify returned an unreadable token response',
+      });
+    },
+  );
+  it('never puts the secret, the code or a token in an error message', async () => {
+    for (const status of [400, 401, 403, 429, 500, 503]) {
+      const http = new FakeShopify({ token: 'shpat_abc', refreshToken: 'shprt_abc' });
+      http.failNext(status);
+      const err = (await exchangeCodeForToken(http, p).catch((e: unknown) => e)) as Error;
+      for (const secret of ['s3cret', 'good-code', 'shpat_abc', 'shprt_abc']) {
+        expect(err.message).not.toContain(secret);
+      }
+    }
   });
   it('maps a rejected code, bad credentials, rate limits and server errors', async () => {
     await expect(

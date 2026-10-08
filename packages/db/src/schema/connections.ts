@@ -36,6 +36,9 @@ export const storeConnections = pgTable(
     encryptedCredentials: text('encrypted_credentials'), // AES-256-GCM via @erq/shared crypto
     scopes: text('scopes').array(),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),
+    /** Non-secret mirror of the expiry times inside the encrypted credentials, so SQL can find aging tokens. */
+    accessTokenExpiresAt: timestamp('access_token_expires_at', { withTimezone: true }),
+    refreshTokenExpiresAt: timestamp('refresh_token_expires_at', { withTimezone: true }),
     lastError: text('last_error'),
     ...timestamps,
   },

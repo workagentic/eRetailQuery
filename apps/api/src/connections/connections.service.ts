@@ -3,6 +3,8 @@ import { and, eq, lt, min, sql } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import {
   buildAuthorizeUrl,
+  credentialExpiry,
+  credentialsFromGrant,
   encryptConnectionCredentials,
   exchangeCodeForToken,
   isValidShopDomain,
@@ -14,6 +16,7 @@ import {
   verifyWebhookSignature,
   type HttpClient,
   type ShopifyConfig,
+  type ShopifyTokenGrant,
 } from '@erq/connectors';
 import {
   type ConnectionsApi,
@@ -133,7 +136,7 @@ export class ConnectionsService {
       if (existing && existing.orgId !== consumed.orgId && existing.status !== 'disconnected') {
         return this.fail('shop_in_use');
       }
-      let token: { accessToken: string; scopes: string[] };
+      let token: ShopifyTokenGrant;
       try {
         token = await exchangeCodeForToken(this.http, {
           shop,
@@ -144,6 +147,8 @@ export class ConnectionsService {
       } catch {
         return this.fail('exchange_failed');
       }
+      const stored = credentialsFromGrant(token, new Date());
+      const expiry = credentialExpiry(stored);
       const { orgId } = consumed;
       let connectionId: string;
       try {
@@ -176,11 +181,9 @@ export class ConnectionsService {
           await tx
             .update(storeConnections)
             .set({
-              encryptedCredentials: encryptConnectionCredentials(
-                { accessToken: token.accessToken },
-                keyProvider,
-                row.id,
-              ),
+              encryptedCredentials: encryptConnectionCredentials(stored, keyProvider, row.id),
+              accessTokenExpiresAt: expiry.accessTokenExpiresAt,
+              refreshTokenExpiresAt: expiry.refreshTokenExpiresAt,
             })
             .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, row.id)));
           await insertAudit(tx, {

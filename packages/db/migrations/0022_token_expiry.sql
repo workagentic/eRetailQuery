@@ -1,0 +1,2 @@
+ALTER TABLE "store_connections" ADD COLUMN "access_token_expires_at" timestamp with time zone;--> statement-breakpoint
+ALTER TABLE "store_connections" ADD COLUMN "refresh_token_expires_at" timestamp with time zone;

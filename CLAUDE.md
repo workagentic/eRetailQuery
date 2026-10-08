@@ -2,7 +2,7 @@
 
 Domain: eretailquery.com
 Owner: Abdullah Shekha
-Status: Phase 0, 1a, 1b-1, 1b-2, 1b-3a and 1b-3b built; see section 16. Next is 1b-3c (live updates), then 1c Meta/Google and 1d dashboard/P&L/Stripe. Build in the phases defined in section 12. Do not skip ahead.
+Status: Phase 0, 1a, 1b-1, 1b-2, 1b-3a and 1b-3b built; see section 16. 1b-3c (live updates) is in progress on branch `phase1b3c-live-updates` (Task 1 of 12 done, paused until disk space is freed), then 1c Meta/Google and 1d dashboard/P&L/Stripe. Build in the phases defined in section 12. Do not skip ahead.
 
 ---
 
@@ -545,3 +545,5 @@ Specs and plans live in `docs/superpowers/specs/` and `docs/superpowers/plans/`.
 - 2026-10-09: Shopify inventory always takes a full pass, incrementals included, until 1b-3c: the inventory item's `updated_at` does not move on quantity-only changes, so the filter left stock stale after Sync now. Inventory has no history window and the sink is idempotent.
 - 2026-10-09: Failed privacy webhook events (`customers/data_request`, `customers/redact`, `shop/redact`) are retried by the sweep (migration 0021 extends `app_list_stale_webhook_events`) instead of staying terminal, because 1b-3b stores order data and an unerased `shop/redact` is a compliance risk. Chosen over re-labelling failed events as `received` so that `failed` stays truthful and a retry waits 10 minutes after the last attempt instead of racing BullMQ's own retries.
 - 2026-10-08: Phase 1b-3b is merged locally into `phase0-foundations` (fast-forward, HEAD b3f0d4a). Phase 1b-3c, the CSV import and the manual and CSV cost paths are the remaining Phase 1b work before 1c and 1d.
+- 2026-10-08: Phase 1b-3c (live updates) is specced (`docs/superpowers/specs/2026-10-08-phase1b3c-live-updates-design.md`) and planned (12 tasks, `docs/superpowers/plans/2026-10-08-phase1b3c-live-updates.md`), and runs on branch `phase1b3c-live-updates`. Decisions: scheduled polling plus webhook nudges; one one-minute ticker with a SECURITY DEFINER due query (migrations 0022 to 0026); tiered cadence (locations, products and orders every 15 minutes, inventory hourly, a daily full products pass); nudges only for non-customer topics (`products/update`, `inventory_levels/update`, plus `app/uninstalled`); expiring offline Shopify tokens (1 h access, 90 d refresh, rotated on every refresh) refreshed under a connection row lock; order-line link-up pass; per-resource sync status; alerts for failed webhooks.
+- 2026-10-08: 1b-3c Task 1 is done (commit 072c321): the install requests expiring tokens and stores the access and refresh tokens with both expiry times (migration 0022). Do not deploy the branch before Task 3 (the token service), because the refresh token still reaches `fetchPage` until then. Work is paused until the owner frees disk space.

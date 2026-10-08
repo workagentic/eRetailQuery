@@ -12,7 +12,7 @@
 
 ## Plan notes (spec versus code, and the rulings)
 
-Each note: what the spec said, what the code does, what this plan does and why.
+Each note: what the spec said, what the code does, what this plan does and why. Notes 17 to 19 record the refinements made after the pre-flight review.
 
 1. **Sync modes.** Spec: `enqueueSync(..., mode: 'full')` for the hourly inventory pass and the daily products pass. Code: `SyncMode` is `'backfill' | 'incremental'` only (`packages/sync/src/ports.ts`), and `fetchInventory` ignores `updatedSince` (it is ALWAYS a full pass). Ruling: inventory's hourly pass is a plain `incremental` run (already full). A real `'full'` mode is added (Task 4) only for products: the run type is `'full'`, `startRun` clears the cursor's `updated_since` so the connector gets no filter, and a completed `backfill` or `full` run stamps the new `sync_cursors.last_full_pass_at`. The daily full pass is a chain `[products, inventory]` in mode `full` (inventory ignores the mode); locations and orders go in a separate incremental chain, so on that one daily tick orders may run before products finish (the link-up pass of Task 8 repairs lines that arrive early).
 2. **Where `last_synced_at` lives.** Per resource it is `sync_cursors.last_synced_at`, set when that resource's run completes. `store_connections.last_synced_at` is set to `now` by any chain end (including a single-resource run), which is the behaviour the spec changes. Ruling (Task 4): the connection column becomes the oldest of the four cursor times, only when all four resources have completed, else unchanged.
@@ -21,7 +21,7 @@ Each note: what the spec said, what the code does, what this plan does and why.
 5. **Token expiry columns.** The expiry lives inside the encrypted blob, so SQL cannot select shops with an aging refresh token (spec 2.3 "idle shops"). Ruling: two non-secret columns `store_connections.access_token_expires_at` and `refresh_token_expires_at` (migration 0022) are written wherever credentials are written (install, refresh). A second SECURITY DEFINER function `app_list_idle_refresh_connections` (migration 0024) uses them. The idle refresh runs inline in the tick (a call to the token service), not as a separate BullMQ job type, so job payloads do not change.
 6. **TokenService injection.** `SyncDeps` gains an optional `tokens?: TokenService`. When absent the engine builds a default from `deps.db` and `deps.keyProvider` with no refresh function (old-shape credentials work, an expiring set that needs refreshing fails with a `PermanentError`). The worker builds the real one with `refreshAccessToken` from `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET` (the worker did not read these before). The engine hands the connector only `{ accessToken }` for an expiring set and the raw decrypted blob for anything else, so the engine stays platform neutral and the connector never sees the refresh token. A final refresh `401` reuses the existing `AuthError` path (`failRun` with `connectionError: true`), so no new failure path exists.
 7. **Webhook topics in the worker.** `handler.ts` parks `products/update` and `inventory_levels/update` as `deferred` today (they sit in `DATA_TOPICS`). They move to the nudge path; the other data topics stay `deferred`. The API receiver accepts any topic and stores it with payload `{}`, so it does not change. `SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS` loses those two topics.
-8. **Debounce.** Spec: "a job id bucketed per connection, resource and minute". Code: `enqueueSync` commits the run row BEFORE it enqueues, so a BullMQ `jobId` collision would silently drop the job and leave a committed ghost run until the stalled-run resumer (10 minutes). Ruling: the debounce is a database gate in the nudge handler (drop when any cursor of the connection is running, when the resource completed within 60 s, or when its last failed attempt was within 60 s). A burst of events therefore becomes at most one sync per resource per minute with no ghost runs. The trade-off (an event arriving within a minute after a run read the data waits for the next poll) is accepted because polling is the safety net.
+8. **Debounce.** Spec: "a job id bucketed per connection, resource and minute". Code: `enqueueSync` commits the run row BEFORE it enqueues, so a BullMQ `jobId` collision would silently drop the job and leave a committed ghost run until the stalled-run resumer (10 minutes). Ruling: the debounce is a database gate in the nudge handler (drop when any cursor of the connection is running, when the resource completed within 60 s, or when its last failed attempt was within 60 s; for inventory the window is 10 minutes, because that sync is a full pass over every level and a busy shop emits a constant stream of stock events). A burst of events therefore becomes at most one sync per resource per minute (inventory: per 10 minutes) with no ghost runs. The trade-off (an event arriving within a minute after a run read the data waits for the next poll) is accepted because polling is the safety net.
 9. **Re-registering webhooks for existing connections.** Nothing records which topics a connection registered. Ruling: no new column; `registerWebhooks` is idempotent ("already taken" counts as registered), so the scheduler re-runs it for a connection on the same tick its daily products pass is due (at most once per day per connection, inside the 50-connection cap). A rejected subscription sets the existing connection warning `Webhook setup failed. Reconnect to retry.` only when `last_error` is empty, and a later full success clears it only when `last_error` is exactly that text.
 10. **Retry counter and alerts.** `webhook_events` has no usable column (only `status`, `error`, `updated_at`), and no `alerts` table exists although CLAUDE.md section 5 lists one. Ruling: migration 0025 adds `webhook_events.sweep_retries` and a proper tenant table `alerts` (composite FK to `store_connections`, partial unique index on open alerts, `app_secure_tenant_table` in 0026, a fixture in `packages/db/test/fixtures.ts`, isolation coverage). The alert message is a FIXED text per topic, not the error text, so no stored string can carry a secret. `app_list_stale_webhook_events` is replaced with `CREATE OR REPLACE` (same signature, never editing 0021). The sweep needs a `db` to bump the counter.
 11. **Link-up placement.** The page transaction holds the cursor row lock, so the link-up runs AFTER the products chain end has committed, in its own bounded transactions (500 lines per batch, at most 200 batches). A failure there never fails the finished run; the pass is idempotent and the next products run repeats it.
@@ -30,6 +30,9 @@ Each note: what the spec said, what the code does, what this plan does and why.
 14. **Task split.** The spec lists ten tasks. This plan has twelve: spec task 2 is split into the connector refresh function (Task 2) and the TokenService with the row lock and engine wiring (Task 3), because a reviewer could approve the pure HTTP function and reject the lock design; spec task 3 is split into the `full` mode and connection-freshness change (Task 4, a dependency of the due logic) and the due query and pure function (Task 5). Order otherwise follows the spec.
 15. **Known gap closed here.** docs/sync.md lists "the connection-health row lock has no test that interleaves two writers". Task 4 adds that test because it changes the same update.
 16. **Cadence arithmetic.** A resource is due when `now - reference >= cadence` (exactly at the cadence counts as due).
+17. **Alert entity reference (D6).** Spec section 7 says the alert's "entity ref the connection". This plan uses `entity_ref = webhook_event:<id>` and keeps the connection link in `store_connection_id` (a composite foreign key). Reason: the rule is one alert per failed EVENT; keyed by connection, the partial unique index would let a second failing event hide behind the first alert and a resolved alert could not tell events apart. The connection is still what the status page and the resolve-on-reconnect/disconnect logic use.
+18. **Two-argument due function (D11).** Spec section 3.2 gives `app_list_due_sync_resources(p_now timestamptz)`; the plan's signature is `app_list_due_sync_resources(p_now timestamptz, p_limit integer)`. The extra `p_limit` lets the database cap the connections it returns (`least(greatest(p_limit, 1), 200)`) so the 50-connection cap, oldest due first, is applied before rows cross the wire; `p_now` stays so the function is deterministic against the injected clock. The idle-refresh function has the same two arguments for the same reason.
+19. **Lock mode and refresh timeouts (D3, D7).** Explicit locks on `store_connections` rows are `FOR NO KEY UPDATE`, never `FOR UPDATE`, because child tables with foreign keys to that row take `FOR KEY SHARE` on it. The refresh transaction also sets `lock_timeout` 5 s and `statement_timeout` 30 s (it holds a pool connection and a row lock during the 10 s HTTP call), and a lock timeout is a retryable `TransientError`.
 
 ## Global Constraints
 
@@ -37,11 +40,11 @@ Each note: what the spec said, what the code does, what this plan does and why.
 - Cadences (`SYNC_CADENCE_MS` in `@erq/sync`): locations 15 min, products 15 min, orders 15 min (incremental); inventory 60 min (a full pass); `PRODUCTS_FULL_PASS_MS` 24 h. `MAX_CONNECTIONS_PER_TICK` 50. The ticker runs every 60 s (fixed scheduler id so restarts do not multiply it).
 - Token refresh: refresh when the access token expires within 5 minutes (`REFRESH_WINDOW_MS`, injected `now`). Idle refresh: connections whose refresh token expires within 14 days (`IDLE_REFRESH_WINDOW_MS`) and whose access token is expired or about to be. Token lifetimes (Shopify, checked 2026-10-08 against https://shopify.dev/docs/apps/build/authentication-authorization/access-tokens/offline-access-tokens and `.../implement-token-exchange`): access token 1 hour (`expires_in` 3600), refresh token 90 days (`refresh_token_expires_in` 7776000). `expiring=1` on the code exchange. Refresh is `POST https://{shop}/admin/oauth/access_token` with `client_id`, `client_secret`, `grant_type=refresh_token`, `refresh_token`; EVERY refresh returns a NEW access token and a NEW refresh token (rotation); a final `401 {"error":"invalid_request"}` covers every terminal cause; only network errors, timeouts, 5xx and 429 are retried, with the SAME refresh token. These shapes are unverified against a real shop.
 - Reconnect text (fixed, through `sanitizeMessage`): `Shopify no longer accepts this connection. Reconnect the store.`
-- Webhook topics (tiered): subscribe to `app/uninstalled`, `products/update`, `inventory_levels/update` only. Order, refund and customer topics are NOT subscribed (protected customer data approval not requested), so orders stay polling-only (15 minutes). Nudges: `products/update` to products, `inventory_levels/update` to inventory. Nudge debounce 60 s.
-- Webhook sweep: failed non-privacy events are re-listed after a 10-minute cool-down (`STALE_EVENT_MS`), at most 5 sweep retries per event (`sweep_retries`), then they stay `failed` and ONE `alerts` row is written (type `webhook_failed`; severity `high` for `app/uninstalled`, `medium` otherwise). Privacy topics (`customers/data_request`, `customers/redact`, `shop/redact`) keep their unlimited retry from migration 0021 and never raise this alert.
+- Webhook topics (tiered): subscribe to `app/uninstalled`, `products/update`, `inventory_levels/update` only. Order, refund and customer topics are NOT subscribed (protected customer data approval not requested), so orders stay polling-only (15 minutes). Nudges: `products/update` to products, `inventory_levels/update` to inventory. Nudge debounce 60 s (inventory 10 minutes, because it re-reads every level; the hourly poll is still the safety net).
+- Webhook sweep: failed events of the three live topics (`app/uninstalled`, `products/update`, `inventory_levels/update`; no other non-privacy topic) are re-listed after a 10-minute cool-down (`STALE_EVENT_MS`), at most 5 sweep retries per event (`sweep_retries`), then they stay `failed` and ONE `alerts` row is written when a handler run fails with `sweep_retries >= 5` (type `webhook_failed`; severity `high` for `app/uninstalled`, `medium` otherwise). Privacy topics (`customers/data_request`, `customers/redact`, `shop/redact`) keep their unlimited retry from migration 0021 and never raise this alert.
 - Credentials and tokens: access token AND refresh token never appear in logs, job payloads, DTOs, audit rows, thrown messages or stored `last_error` text. Connector errors use FIXED strings; stored error text always passes through `sanitizeMessage`. Tests assert this with the actual values used in the test, not with literal prefixes.
 - Shopify rejects a GraphQL query whose requested cost exceeds 1000 points. The only new query is the existing `webhookSubscriptionCreate` mutation (one tiny object, no pagination, cost about 10 points; a comment says so). No new paginated or nested query is added. Every loop added by this plan has a bound and a null/zero-progress guard, and a test pins it.
-- The cursor never advances without its data (same transaction, compare-and-set). The engine's connection-health update happens only at a real chain end and never for `resumed` jobs; `failRun` never touches disconnected or demo connections. Lock order is cursor row, then connection row; any new row lock follows it (the token refresh takes ONLY the connection row lock, never while holding a cursor lock).
+- The cursor never advances without its data (same transaction, compare-and-set). The engine's connection-health update happens only at a real chain end and never for `resumed` jobs; `failRun` never touches disconnected or demo connections. Lock order is cursor row, then connection row; any new row lock follows it (the token refresh takes ONLY the connection row lock, never while holding a cursor lock). Every explicit lock on the `store_connections` row is `FOR NO KEY UPDATE` (the token refresh in Task 3 and the chain-end health lock in Task 4), never `FOR UPDATE`: child tables have foreign keys to that row and their writes take `FOR KEY SHARE` on it, which `FOR UPDATE` would block.
 - New SECURITY DEFINER functions: `SET search_path = pg_catalog, public, pg_temp`, `REVOKE ALL ... FROM PUBLIC`, revoke from `anon` and `authenticated` when they exist, `GRANT EXECUTE` to `app_user` only, and a Postgres test for the hardening. They are worker-only and never exposed through an API route. New tenant tables need `app_secure_tenant_table`, a fixture and composite `(org_id, id)` foreign keys.
 - Existing behaviours that must keep working: `enqueueSync` failure cleanup (`abandonRun`), the `resumed` flag, Sync now's running-cursor guard and its 409/503 semantics, the privacy sweep (0021), webhook receiver idempotency and empty payload storage, and the `describeSync` wording rules (never claim more than the oldest resource; an `error` connection shows its `lastError`).
 - Redis/BullMQ, real Shopify and Playwright cannot run in this environment (no Docker): everything is tested against fakes and the embedded Postgres. The unverifiable items are listed for the first-install checklist in Task 12.
@@ -961,11 +964,15 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `REFRESH_WINDOW_MS = 5 * 60_000`, `IDLE_REFRESH_WINDOW_MS = 14 * 24 * 60 * 60_000`
   - `interface TokenService { ensureFresh(args: { orgId: string; connectionId: string }): Promise<unknown> }` (returns the credentials to hand the connector: `{ accessToken }` for an expiring set, the raw decrypted blob for anything else, `null` for a connection without credentials)
   - `type RefreshFn = (args: { shop: string; refreshToken: string }) => Promise<ShopifyRefreshGrant>`
-  - `createTokenService(deps: { db: Pick<TenantDb, 'withTenant'>; keyProvider: KeyProvider; refresh?: RefreshFn; now?: () => Date }): TokenService`
+  - `createTokenService(deps: { db: Pick<TenantDb, 'withTenant'>; keyProvider: KeyProvider; refresh?: RefreshFn; now?: () => Date; lockTimeoutMs?: number }): TokenService` (`lockTimeoutMs` defaults to `REFRESH_LOCK_TIMEOUT_MS = 5000`; tests pass a small value)
   - `SyncDeps.tokens?: TokenService`
 - Produces (worker): `workerRefreshFn(env: NodeJS.ProcessEnv, http?: HttpClient): RefreshFn | undefined` and `createWorkerTokenService(env, db, keyProvider, http?): TokenService` in `apps/worker/src/sync/tokens.ts`.
 
-Behaviour of `ensureFresh`: (1) unlocked read; (2) not an expiring set, or the access token has MORE than `REFRESH_WINDOW_MS` left: return without a lock and without a call; (3) otherwise `withTenant` + `SELECT ... FOR UPDATE` on the connection row, re-read and re-decrypt (a concurrent caller may have rotated), re-check, then refuse when the refresh token is already expired (`AuthError(SHOPIFY_RECONNECT_MESSAGE)`, no call), then call `refresh`, then write the encrypted pair and both expiry columns in the SAME transaction. The lock is held across the Shopify call (bounded by the 10 s HTTP timeout) on purpose: it is what serialises rotation. It takes only the connection row lock, never a cursor lock. A thrown error rolls the transaction back, so nothing is half written.
+Behaviour of `ensureFresh`: (1) unlocked read; (2) not an expiring set, or the access token has MORE than `REFRESH_WINDOW_MS` left: return without a lock and without a call; (3) otherwise `withTenant` + `SET LOCAL lock_timeout = '5s'` and `SET LOCAL statement_timeout = '30s'` + `SELECT ... FOR NO KEY UPDATE` on the connection row, re-read and re-decrypt (a concurrent caller may have rotated), re-check, then refuse when the refresh token is already expired (`AuthError(SHOPIFY_RECONNECT_MESSAGE)`, no call), then call `refresh`, then write the encrypted pair and both expiry columns in the SAME transaction. The lock is held across the Shopify call (bounded by the 10 s HTTP timeout) on purpose: it is what serialises rotation. It takes only the connection row lock, never a cursor lock. A thrown error rolls the transaction back, so nothing is half written.
+
+Why `FOR NO KEY UPDATE` and not `FOR UPDATE` (D3): `sync_cursors`, `sync_runs`, `webhook_events`, `alerts` and the other children carry composite foreign keys to `store_connections`, and inserting or updating a child row takes `FOR KEY SHARE` on the parent row. `FOR UPDATE` conflicts with `FOR KEY SHARE`, so a refresh holding the lock across a 10 s HTTP call would stall (and could deadlock with) every page transaction writing a child row of that connection; `FOR NO KEY UPDATE` still serialises all refreshes and every other `NO KEY UPDATE`/`UPDATE` writer of the row (it conflicts with itself) but does NOT conflict with `KEY SHARE`. The chain-end connection-health lock in `process.ts` (Task 4) uses the same mode for the same reason.
+
+Why the two timeouts (D7): the refresh transaction holds a pooled connection AND a row lock during the 10 s HTTP call. `lock_timeout` (5 s) stops a caller from waiting unbounded behind a stuck holder, and `statement_timeout` (30 s) bounds any single statement; both are `SET LOCAL`, so they end with the transaction and never leak into the pool. A lock timeout (Postgres `55P03`) is converted to a `TransientError` ("Token refresh is busy, retrying"): nothing was changed, the queue retries, and the retry re-reads the (by then rotated) pair. Accepted (D13): a non-401, non-transient refresh answer from Shopify (for example a `400`) is a `PermanentError`: the run fails WITHOUT marking the connection `error`, and the next poll tries again (only a final `401` marks the connection and asks for a reconnect).
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -1096,7 +1103,7 @@ describe('createTokenService.ensureFresh', () => {
     ]);
     expect((await stored()).creds.refreshToken).toBe('shprt_gen1');
   });
-  it('holds the connection row lock while it refreshes, and commits the new pair when it lets go', async () => {
+  it('holds a FOR NO KEY UPDATE lock on the connection row while it refreshes, without blocking key-share writers, and commits the new pair when it lets go', async () => {
     let entered!: () => void;
     const inside = new Promise<void>((r) => (entered = r));
     let release!: () => void;
@@ -1111,9 +1118,16 @@ describe('createTokenService.ensureFresh', () => {
     const c = await env.owner.connect();
     try {
       await c.query('begin');
+      // The refresher holds FOR NO KEY UPDATE. Both FOR UPDATE and FOR NO KEY UPDATE conflict with it, so NOWAIT
+      // gets 55P03 (lock_not_available) in either mode; we use the SAME mode a second refresher would use.
       await expect(
-        c.query('select id from store_connections where id = $1 for update nowait', [CONN_A]),
-      ).rejects.toMatchObject({ code: '55P03' }); // lock_not_available
+        c.query('select id from store_connections where id = $1 for no key update nowait', [CONN_A]),
+      ).rejects.toMatchObject({ code: '55P03' });
+      await c.query('rollback');
+      // ... but a child-row writer (it takes FOR KEY SHARE on the parent) is NOT blocked: this is what FOR UPDATE
+      // would have broken. `for key share nowait` must succeed while the refresh is in flight.
+      await c.query('begin');
+      await c.query('select id from store_connections where id = $1 for key share nowait', [CONN_A]);
       await c.query('rollback');
     } finally {
       c.release();
@@ -1122,6 +1136,23 @@ describe('createTokenService.ensureFresh', () => {
     release();
     await expect(pending).resolves.toEqual({ accessToken: 'shpat_gen1' });
     expect((await stored()).creds.refreshToken).toBe('shprt_gen1');
+  });
+  it('turns a lock timeout into a TransientError, leaving the stored pair untouched and calling Shopify not at all', async () => {
+    const { fn, calls } = rotating();
+    const blocker = await env.owner.connect();
+    try {
+      await blocker.query('begin');
+      // A holder that is NOT the refresher: FOR NO KEY UPDATE, the mode the refresher itself needs.
+      await blocker.query('select id from store_connections where id = $1 for no key update', [CONN_A]);
+      const svc = createTokenService({ db: env.db, keyProvider, refresh: fn, now: () => NOW, lockTimeoutMs: 150 });
+      await expect(svc.ensureFresh(args)).rejects.toBeInstanceOf(TransientError);
+      expect(calls).toEqual([]);
+      await blocker.query('rollback');
+    } finally {
+      blocker.release();
+    }
+    expect((await stored()).creds.refreshToken).toBe('shprt_seed');
+    await expect(service(fn).ensureFresh(args)).resolves.toEqual({ accessToken: 'shpat_gen1' }); // the retry works
   });
   it('a transient failure leaves the stored pair untouched, and the retry uses the SAME refresh token', async () => {
     const calls: string[] = [];
@@ -1341,11 +1372,12 @@ Expected: FAIL (module `../src/tokens` / `../src/sync/tokens` not found).
 Create `packages/sync/src/tokens.ts`:
 
 ```ts
-import { and, eq } from 'drizzle-orm';
+import { and, eq, sql } from 'drizzle-orm';
 import {
   AuthError,
   PermanentError,
   SHOPIFY_RECONNECT_MESSAGE,
+  TransientError,
   credentialExpiry,
   credentialsFromGrant,
   decryptConnectionCredentials,
@@ -1361,6 +1393,16 @@ import type { KeyProvider } from '@erq/shared';
 export const REFRESH_WINDOW_MS = 5 * 60_000;
 /** The scheduler refreshes idle shops whose refresh token has this much life left (or less). */
 export const IDLE_REFRESH_WINDOW_MS = 14 * 24 * 60 * 60_000;
+/** How long a refresh waits for the connection row lock before it gives up with a TransientError (retried). */
+export const REFRESH_LOCK_TIMEOUT_MS = 5_000;
+/** Upper bound for any single statement in the refresh transaction (it holds a pool connection and a row lock). */
+const REFRESH_STATEMENT_TIMEOUT_MS = 30_000;
+
+/** Postgres 55P03 = lock_not_available (lock_timeout expired); drizzle wraps the driver error in `cause`. */
+function isLockTimeout(error: unknown): boolean {
+  const e = error as { code?: string; cause?: { code?: string } } | null;
+  return e?.code === '55P03' || e?.cause?.code === '55P03';
+}
 
 export type RefreshFn = (args: { shop: string; refreshToken: string }) => Promise<ShopifyRefreshGrant>;
 
@@ -1379,6 +1421,8 @@ export interface TokenServiceDeps {
   /** Absent means "cannot refresh": an expiring token that needs it fails with a PermanentError. */
   refresh?: RefreshFn;
   now?: () => Date;
+  /** Defaults to REFRESH_LOCK_TIMEOUT_MS; tests pass a small value. */
+  lockTimeoutMs?: number;
 }
 
 const needsRefresh = (c: ExpiringCredentials, now: Date): boolean =>
@@ -1386,11 +1430,18 @@ const needsRefresh = (c: ExpiringCredentials, now: Date): boolean =>
 
 /**
  * Rotation makes a refresh token single use, so two jobs must never refresh the same shop at once. The
- * refresh therefore runs inside one transaction that holds `SELECT ... FOR UPDATE` on the connection row:
+ * refresh therefore runs inside one transaction that holds `SELECT ... FOR NO KEY UPDATE` on the connection row:
  * a second caller blocks, then re-reads the (already rotated) credentials and does not call Shopify. The new
  * pair is written in that same transaction. The lock is held across the Shopify call on purpose (bounded by
  * the HTTP client's 10 s timeout). It takes the connection row lock ONLY, never a cursor lock, so it cannot
  * invert the cursor-then-connection order used by the engine.
+ * NO KEY UPDATE, not UPDATE: child tables (sync_cursors, sync_runs, ...) have foreign keys to this row, and
+ * their inserts and updates take FOR KEY SHARE on it. FOR UPDATE conflicts with FOR KEY SHARE and would stall
+ * (or deadlock with) page transactions for the whole HTTP call; FOR NO KEY UPDATE does not.
+ * The transaction holds a pooled connection and the lock during the HTTP call, so it sets LOCAL timeouts: a
+ * lock wait over `lockTimeoutMs` becomes a TransientError (the queue retries; nothing was changed), and no
+ * statement runs longer than 30 s. A non-401 non-transient answer from Shopify (for example 400) is a
+ * PermanentError: the run fails without marking the connection `error`, and the next poll tries again.
  * Residual risk: if Shopify answered but the commit then fails, the old token is dead and the new one is lost;
  * the next call gets a final 401 and the shop must be reconnected (docs/sync.md).
  */
@@ -1414,14 +1465,24 @@ export function createTokenService(deps: TokenServiceDeps): TokenService {
       if (!needsRefresh(expiring, now())) return { accessToken: expiring.accessToken };
 
       return deps.db.withTenant(orgId, async (tx) => {
-        const [row] = await tx
-          .select({
-            encrypted: storeConnections.encryptedCredentials,
-            shop: storeConnections.externalAccountId,
-          })
-          .from(storeConnections)
-          .where(eq(storeConnections.id, connectionId))
-          .for('update');
+        // Integers only (never user input), so sql.raw is safe; SET LOCAL cannot take bind parameters.
+        const lockMs = Math.max(1, Math.trunc(deps.lockTimeoutMs ?? REFRESH_LOCK_TIMEOUT_MS));
+        await tx.execute(sql.raw(`set local lock_timeout = ${lockMs}`));
+        await tx.execute(sql.raw(`set local statement_timeout = ${REFRESH_STATEMENT_TIMEOUT_MS}`));
+        let row: { encrypted: string | null; shop: string } | undefined;
+        try {
+          [row] = await tx
+            .select({
+              encrypted: storeConnections.encryptedCredentials,
+              shop: storeConnections.externalAccountId,
+            })
+            .from(storeConnections)
+            .where(eq(storeConnections.id, connectionId))
+            .for('no key update');
+        } catch (error) {
+          if (isLockTimeout(error)) throw new TransientError('Token refresh is busy, retrying');
+          throw error;
+        }
         if (!row) throw new PermanentError('store connection not found');
         // Re-read after the lock: another job may have rotated the pair while we waited.
         const locked = readExpiringCredentials(read(row.encrypted, connectionId));
@@ -1545,7 +1606,8 @@ Dependency note: the due logic (Task 5) needs a way to ask for a pass that reads
 **Files:**
 - Modify: `packages/sync/src/ports.ts`, `packages/sync/src/job-schema.ts`, `packages/sync/src/engine/start.ts`, `packages/sync/src/engine/process.ts`
 - Modify: `packages/db/src/schema/orders.ts` (`syncCursors`); generated `packages/db/migrations/0023_cursor_full_pass.sql` and `migrations/meta/*`
-- Test: `packages/sync/test/job-schema.test.ts` (add), `packages/sync/test/engine.test.ts` (add, and rewrite two tests), `packages/sync/test/shopify-engine-e2e.test.ts` (check two assertions)
+- Modify (lock mode, D3): the chain-end connection lock in `packages/sync/src/engine/process.ts` becomes `FOR NO KEY UPDATE` (see Step 3)
+- Test: `packages/sync/test/job-schema.test.ts` (add), `packages/sync/test/engine.test.ts` (add, and rewrite two tests; the interleaving test's blocker holds `FOR NO KEY UPDATE`), `packages/sync/test/shopify-engine-e2e.test.ts` (check two assertions)
 
 **Interfaces:**
 - Produces:
@@ -1721,7 +1783,10 @@ Add the interleaving test (this closes the known gap "the connection-health row 
     const blocker = await env.owner.connect();
     try {
       await blocker.query('begin');
-      await blocker.query('select id from store_connections where id = $1 for update', [CONN_A]);
+      // The blocker holds FOR NO KEY UPDATE: the same mode the chain end now takes (and the mode of the token
+      // refresh), so the chain end's own `for no key update` conflicts with it and must wait. (The blocker's
+      // own insert into sync_cursors below takes FOR KEY SHARE on the connection row, which its own lock allows.)
+      await blocker.query('select id from store_connections where id = $1 for no key update', [CONN_A]);
       const ending = processSyncPage(h.deps, job);
       await waitUntilBlocked();
       await blocker.query(
@@ -1796,6 +1861,16 @@ Generate: `cd "C:/Users/OK COMPUTER/Desktop/WorkAgentic/eRetailQuery/packages/db
               where ${syncCursors.storeConnectionId} = ${storeConnections.id}), ${storeConnections.lastSyncedAt})`,
 ```
 and import `SYNC_RESOURCES` from `@erq/connectors`.
+- Change the chain-end connection lock (the existing 1b-3b `.for('update')` on `storeConnections`, about line 205, NOT the cursor-row lock above it, which stays `FOR UPDATE`) to `.for('no key update')` and replace its comment with:
+
+```ts
+        // Lock the connection row (after the cursor row, the same order as failRun) so the check below sees a
+        // failed cursor committed concurrently by another job of this connection. FOR NO KEY UPDATE, not FOR
+        // UPDATE: this same transaction (and every other page transaction of the connection) inserts or updates
+        // child rows that take FOR KEY SHARE on this row, and the token refresh (Task 3) holds NO KEY UPDATE
+        // across an HTTP call; FOR UPDATE would conflict with all of them (stalls, deadlocks).
+```
+It still serialises against every other writer of the row (the health UPDATE below, `failRun`, the refresh), because those all take `NO KEY UPDATE` or stronger (`failRun` in `fail.ts` takes no explicit lock: its connection UPDATE implicitly takes `FOR NO KEY UPDATE`, so nothing to change there).
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
@@ -1833,7 +1908,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `dueResources(cursors: readonly CursorSnapshot[], now: Date): DueResource[]`
   - `planChains(due: readonly DueResource[]): { incremental: SyncResource[]; full: SyncResource[] }`
 - Produces (SQL, worker-only, never through a route): `app_list_due_sync_resources(p_now timestamptz, p_limit integer) returns table (o_org_id uuid, o_connection_id uuid, o_resource sync_resource, o_status cursor_status, o_last_synced_at timestamptz, o_last_full_pass_at timestamptz, o_updated_at timestamptz)` and `app_list_idle_refresh_connections(p_now timestamptz, p_limit integer) returns table (o_org_id uuid, o_connection_id uuid)`.
-- Rules: a connection is listed only when it is a Shopify connection with status `active` and credentials, all four of its resources have a cursor row with a non-null `last_synced_at` (the first backfill finished), and NO cursor is `running`. A cursor's reference time is `last_synced_at`, or `max(last_synced_at, updated_at)` while it is `failed` (back-off from the last attempt). The SQL only pre-filters (some reference older than 15 minutes, or the products full pass due); `dueResources` makes the real decision. Connections come oldest first and at most `least(greatest(p_limit, 1), 200)`.
+- Rules: a connection is listed only when it is a Shopify connection with status `active` and credentials, all four of its resources have a cursor row with a non-null `last_synced_at` (the first backfill finished), and NO cursor is `running`. A cursor's reference time is `last_synced_at`, or `max(last_synced_at, updated_at)` while it is `failed` (back-off from the last attempt). The SQL only pre-filters, PER RESOURCE (D4): a connection is a candidate only when some resource's own reference time plus ITS OWN cadence (inventory 60 minutes, the others 15 minutes) has passed, or its products full pass is due (never run, or older than 24 hours; for a `failed` products cursor measured from the last attempt plus 15 minutes); candidates are ordered by the earliest such due time. A connection-wide "oldest cursor older than 15 minutes" test would list every connection whose only stale-ish resource is a 30-minute-old inventory cursor and starve real work behind the 50 cap. `dueResources` makes the real decision. Connections come oldest first and at most `least(greatest(p_limit, 1), 200)`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2110,6 +2185,26 @@ describe('app_list_due_sync_resources', () => {
     await addCursors(C1, A, { syncedMinAgo: 5, fullPassMinAgo: 60, per: { orders: { status: 'failed', syncedMinAgo: 180, updatedMinAgo: 16 } } });
     expect(connectionsOf(await due())).toEqual([C1]);
   });
+  it('judges each resource by its OWN cadence, so connections whose only stale-ish resource is inventory cannot starve a due one (50 cap)', async () => {
+    // 51 connections whose cursors are all 5 minutes old except inventory at 30 minutes: inventory is not due
+    // until 60 minutes, so none of these is a candidate. A connection-wide "oldest cursor older than 15 minutes"
+    // pre-filter would list all 51, fill the cap of 50 (oldest first) and hide the connection below.
+    for (let i = 0; i < 51; i += 1) {
+      const id = `dddddddd-0000-4000-8000-${String(i).padStart(12, '0')}`;
+      await addConnection(id, A);
+      await addCursors(id, A, { syncedMinAgo: 5, fullPassMinAgo: 60, per: { inventory: { syncedMinAgo: 30 } } });
+    }
+    const due20 = 'eeeeeeee-0000-4000-8000-000000000001';
+    await addConnection(due20, A);
+    await addCursors(due20, A, { syncedMinAgo: 5, fullPassMinAgo: 60, per: { orders: { syncedMinAgo: 20 } } });
+    const listed = connectionsOf(await due(50));
+    expect(listed).toEqual([due20]);
+    // and inventory alone becomes a candidate at exactly its own cadence
+    await owner.query(
+      `update sync_cursors set last_synced_at = now() - interval '61 minutes' where resource = 'inventory' and store_connection_id = 'dddddddd-0000-4000-8000-000000000000'`,
+    );
+    expect(connectionsOf(await due(50)).sort()).toEqual([due20, 'dddddddd-0000-4000-8000-000000000000'].sort());
+  });
   it('returns the oldest connections first and honours the limit', async () => {
     await addConnection(C1, A);
     await addCursors(C1, A, { syncedMinAgo: 30 });
@@ -2161,7 +2256,7 @@ describe.each([
 });
 ```
 
-In `packages/db/test/hardening.test.ts` add a list `const SCHEDULE_FNS = ['app_list_due_sync_resources(timestamptz, integer)', 'app_list_idle_refresh_connections(timestamptz, integer)'];` next to `HELPER_FNS`, include it in the two Supabase-simulation loops (`for (const fn of [...ACCOUNT_FNS, ...HELPER_FNS, ...SCHEDULE_FNS])` for anon/authenticated having no execute) and add a separate assertion that `app_user` still executes `SCHEDULE_FNS` (copy the `app_user still executes the account functions` test with that list).
+In `packages/db/test/hardening.test.ts` add a list `const SCHEDULE_FNS = ['app_list_due_sync_resources(timestamptz, integer)', 'app_list_idle_refresh_connections(timestamptz, integer)'];` next to `HELPER_FNS`, include it in the ONE Supabase-simulation loop (the `it.each(['anon', 'authenticated'])` test at about line 90: change its `for (const fn of [...ACCOUNT_FNS, ...HELPER_FNS])` to `[...ACCOUNT_FNS, ...HELPER_FNS, ...SCHEDULE_FNS]`, asserting anon/authenticated have no execute) and add ONE new assertion that `app_user` still executes `SCHEDULE_FNS` (copy the existing `app_user still executes the account functions` test, about line 112, with that list).
 
 - [ ] **Step 2: Run to see the failures**
 
@@ -2266,37 +2361,46 @@ Run: `cd "C:/Users/OK COMPUTER/Desktop/WorkAgentic/eRetailQuery/packages/db" && 
 ```sql
 -- The scheduler's two cross-tenant reads (worker only, never exposed through an API route). They return ids and
 -- timestamps only. app_list_due_sync_resources PRE-FILTERS; packages/sync/src/schedule/due.ts makes the real
--- decision, so the cadence numbers below (15 minutes, 24 hours) must stay in line with SYNC_CADENCE_MS and
--- PRODUCTS_FULL_PASS_MS.
+-- decision, so the cadence numbers below (15 minutes, inventory 60 minutes, 24 hours) must stay in line with
+-- SYNC_CADENCE_MS and PRODUCTS_FULL_PASS_MS.
 CREATE OR REPLACE FUNCTION app_list_due_sync_resources(p_now timestamptz, p_limit integer)
 RETURNS TABLE (
   o_org_id uuid, o_connection_id uuid, o_resource sync_resource, o_status cursor_status,
   o_last_synced_at timestamptz, o_last_full_pass_at timestamptz, o_updated_at timestamptz
 )
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $$
-  WITH ref AS (
+  WITH per AS (
+    -- Per resource: when is it next due? reference time (the last ATTEMPT while failed) plus ITS OWN cadence.
     SELECT c.store_connection_id AS connection_id,
-           min(CASE WHEN c.status = 'failed' THEN greatest(c.last_synced_at, c.updated_at) ELSE c.last_synced_at END) AS oldest
+           (CASE WHEN c.status = 'failed' THEN greatest(c.last_synced_at, c.updated_at) ELSE c.last_synced_at END)
+             + CASE WHEN c.resource = 'inventory' THEN interval '60 minutes' ELSE interval '15 minutes' END AS next_at,
+           -- The daily products full pass (never run, or 24 hours old), also backed off while failed.
+           CASE WHEN c.resource = 'products'
+                     AND (c.last_full_pass_at IS NULL OR c.last_full_pass_at <= p_now - interval '24 hours')
+                THEN CASE WHEN c.status = 'failed' THEN greatest(c.last_synced_at, c.updated_at) + interval '15 minutes'
+                          ELSE coalesce(c.last_full_pass_at + interval '24 hours', c.last_synced_at) END
+           END AS full_at
     FROM sync_cursors c
-    GROUP BY c.store_connection_id
+  ), ref AS (
+    -- least() ignores NULLs: the earliest moment ANY resource of the connection becomes due.
+    SELECT connection_id, least(min(next_at), min(full_at)) AS next_due
+    FROM per
+    GROUP BY connection_id
   ), eligible AS (
-    SELECT sc.id, r.oldest
+    SELECT sc.id, r.next_due
     FROM store_connections sc
     JOIN ref r ON r.connection_id = sc.id
     WHERE sc.platform = 'shopify' AND sc.status = 'active' AND sc.encrypted_credentials IS NOT NULL
       AND (SELECT count(c.last_synced_at) FROM sync_cursors c WHERE c.store_connection_id = sc.id) = 4
       AND NOT EXISTS (SELECT 1 FROM sync_cursors c WHERE c.store_connection_id = sc.id AND c.status = 'running')
-      AND (r.oldest <= p_now - interval '15 minutes'
-           OR EXISTS (SELECT 1 FROM sync_cursors c
-                      WHERE c.store_connection_id = sc.id AND c.resource = 'products'
-                        AND (c.last_full_pass_at IS NULL OR c.last_full_pass_at <= p_now - interval '24 hours')))
-    ORDER BY r.oldest, sc.id
+      AND r.next_due <= p_now
+    ORDER BY r.next_due, sc.id
     LIMIT least(greatest(p_limit, 1), 200)
   )
   SELECT c.org_id, c.store_connection_id, c.resource, c.status, c.last_synced_at, c.last_full_pass_at, c.updated_at
   FROM sync_cursors c
   JOIN eligible e ON e.id = c.store_connection_id
-  ORDER BY e.oldest, e.id, c.resource
+  ORDER BY e.next_due, e.id, c.resource
 $$;
 --> statement-breakpoint
 -- Shops that have nothing to sync (for example the first backfill never finished) still need their refresh token
@@ -2329,7 +2433,7 @@ BEGIN
   END LOOP;
 END $$;
 ```
-(The `ORDER BY r.oldest, sc.id` puts the oldest due connection first; the idle test with `limit 0` returning one connection comes from `greatest(p_limit, 1)`.)
+(The `ORDER BY r.next_due, sc.id` puts the connection that became due first first; the idle test with `limit 0` returning one connection comes from `greatest(p_limit, 1)`.)
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
@@ -2943,11 +3047,11 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
   - `SHOPIFY_WEBHOOK_TOPICS = ['app/uninstalled', 'products/update', 'inventory_levels/update'] as const`; `SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS` without those two.
   - `WEBHOOK_SETUP_FAILED_MESSAGE = 'Webhook setup failed. Reconnect to retry.'` (`@erq/sync`, next to `IMPORT_NOT_STARTED_MESSAGE`).
   - `FakeShopify({ rejectTopics?: Set<string> })`: a rejected topic answers `userErrors` (not "already taken") and is not stored.
-  - worker `nudge.ts`: `NUDGE_DEBOUNCE_MS = 60_000`; `nudgeResourceFor(topic: string): SyncResource | null`; `type NudgeResult = 'started' | 'dropped'`; `nudgeSync(deps: { db: TenantDb; queue: JobQueue; now: () => Date }, args: { orgId: string; connectionId: string; resource: SyncResource }): Promise<NudgeResult>`.
+  - worker `nudge.ts`: `NUDGE_DEBOUNCE_MS = 60_000` (products), `INVENTORY_NUDGE_DEBOUNCE_MS = 10 * 60_000` (inventory: its sync is a FULL pass of every level, so a busy shop's constant `inventory_levels/update` stream must not trigger one every minute), `nudgeDebounceMs(resource: SyncResource): number`; `nudgeResourceFor(topic: string): SyncResource | null`; `type NudgeResult = 'started' | 'dropped'`; `nudgeSync(deps: { db: TenantDb; queue: JobQueue; now: () => Date }, args: { orgId: string; connectionId: string; resource: SyncResource }): Promise<NudgeResult>`.
   - worker `reconcile.ts`: `createWebhookReconciler(deps: { db: TenantDb; tokens: TokenService; http: HttpClient; callbackUrl: string; apiVersion: string }): (args: { orgId: string; connectionId: string }) => Promise<void>`.
   - `WebhookHandlerDeps.sync?: { queue: JobQueue }` (without it a nudge topic ends `ignored`).
   - `SchedulerDeps.reconcileWebhooks?: (args: { orgId: string; connectionId: string }) => Promise<void>`, called once per connection on the tick that starts its daily products full pass.
-- Rules: a nudge is dropped (event still ends `processed`) unless the connection is `active`, all four resources have completed once, no cursor of the connection is running, the nudged resource did not complete within the last 60 s, and (when it failed) its last attempt was at least 60 s ago. Otherwise it calls `enqueueSync(..., { resources: [resource], mode: 'incremental' })` (inventory is already a full pass). The event payload is `{}` before and after.
+- Rules: a nudge is dropped (event still ends `processed`) unless the connection is `active`, all four resources have completed once, no cursor of the connection is running, the nudged resource did not complete within its debounce window (60 s; inventory 10 minutes), and (when it failed) its last attempt was at least that window ago. Otherwise it calls `enqueueSync(..., { resources: [resource], mode: 'incremental' })` (inventory is already a full pass). The event payload is `{}` before and after.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3015,7 +3119,12 @@ import { createConnectionsApi, createTenantDb, type ConnectionsApi, type TenantD
 import { startTestDatabase, type TestDatabase } from '@erq/db/testing';
 import { InMemoryJobQueue, type JobQueue, type SyncPageJob } from '@erq/sync';
 import { processWebhookEvent } from '../src/webhooks/handler';
-import { NUDGE_DEBOUNCE_MS, nudgeResourceFor } from '../src/webhooks/nudge';
+import {
+  INVENTORY_NUDGE_DEBOUNCE_MS,
+  NUDGE_DEBOUNCE_MS,
+  nudgeDebounceMs,
+  nudgeResourceFor,
+} from '../src/webhooks/nudge';
 
 const ORG = '11111111-1111-4111-8111-111111111111';
 const OTHER = '33333333-3333-4333-8333-333333333333';
@@ -3132,6 +3241,29 @@ describe('a nudge', () => {
     await seedCursors(ORG, { per: { products: { agoSec: 60 } } });
     await handle(await addEvent('products/update'));
     expect(jobs()).toHaveLength(1);
+  });
+  it('debounces an inventory nudge for 10 minutes (a full pass), while a products nudge keeps its 60 s', async () => {
+    expect(INVENTORY_NUDGE_DEBOUNCE_MS).toBe(10 * 60_000);
+    expect(nudgeDebounceMs('inventory')).toBe(INVENTORY_NUDGE_DEBOUNCE_MS);
+    for (const r of ['products', 'locations', 'orders'] as const) expect(nudgeDebounceMs(r)).toBe(NUDGE_DEBOUNCE_MS);
+    // inventory completed 9 min 59 s ago: dropped. A products nudge in the same state (5 min ago) starts.
+    await seedCursors(ORG, { per: { inventory: { agoSec: 599 }, products: { agoSec: 300 } } });
+    expect(await handle(await addEvent('inventory_levels/update'))).toBe('processed');
+    expect(jobs()).toEqual([]);
+    expect(await handle(await addEvent('products/update'))).toBe('processed');
+    expect(jobs()).toHaveLength(1);
+    // exactly 10 minutes ago: the inventory nudge starts
+    await owner.query('delete from sync_cursors');
+    await owner.query('delete from sync_runs');
+    await seedCursors(ORG, { per: { inventory: { agoSec: 600 } } });
+    await handle(await addEvent('inventory_levels/update'));
+    expect(jobs()).toHaveLength(1);
+    // a FAILED inventory attempt 5 minutes ago also waits (the back-off uses the same window)
+    await owner.query('delete from sync_cursors');
+    await owner.query('delete from sync_runs');
+    await seedCursors(ORG, { per: { inventory: { status: 'failed', agoSec: 7200, updatedAgoSec: 300 } } });
+    await handle(await addEvent('inventory_levels/update'));
+    expect(jobs()).toEqual([]);
   });
   it('is dropped while ANY cursor of the connection is running', async () => {
     await seedCursors(ORG, { per: { orders: { status: 'running' } } });
@@ -3410,8 +3542,14 @@ import { SYNC_RESOURCES, type SyncResource } from '@erq/connectors';
 import { storeConnections, syncCursors, type TenantDb } from '@erq/db';
 import { enqueueSync, type JobQueue } from '@erq/sync';
 
-/** A burst of events becomes at most one sync per resource per minute. */
+/** A burst of events becomes at most one sync per resource per minute... */
 export const NUDGE_DEBOUNCE_MS = 60_000;
+/** ... except inventory: its sync is a full pass over every level, and busy shops emit a constant stream of events. */
+export const INVENTORY_NUDGE_DEBOUNCE_MS = 10 * 60_000;
+
+export function nudgeDebounceMs(resource: SyncResource): number {
+  return resource === 'inventory' ? INVENTORY_NUDGE_DEBOUNCE_MS : NUDGE_DEBOUNCE_MS;
+}
 
 const NUDGE_TOPICS: Readonly<Record<string, SyncResource>> = {
   'products/update': 'products',
@@ -3463,7 +3601,7 @@ export async function nudgeSync(
       own.status === 'failed'
         ? Math.max(own.lastSyncedAt.getTime(), own.updatedAt.getTime())
         : own.lastSyncedAt.getTime();
-    return now.getTime() - reference >= NUDGE_DEBOUNCE_MS;
+    return now.getTime() - reference >= nudgeDebounceMs(args.resource);
   });
   if (!go) return 'dropped';
   const started = await enqueueSync(
@@ -3617,6 +3755,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 - Consumes: `loadCostRows`, `snapshotUnitCogs`, `toOrgDate` (`packages/sync/src/cogs.ts`), `skuChannelListings`, `orderLines`, `orders`, `orgs`.
 - Produces: `LINKUP_BATCH_SIZE = 500`, `LINKUP_MAX_BATCHES = 200`, `linkOrderLines(db: Pick<TenantDb, 'withTenant'>, args: { orgId: string; connectionId: string }, opts?: { batchSize?: number; maxBatches?: number }): Promise<{ linked: number }>`.
 - Rules: candidates are lines of THIS connection's orders with `sku_id IS NULL` whose `external_variant_id` has a channel listing of the same connection. For each: set `sku_id`, and set the cost snapshot to `existing ?? snapshotUnitCogs(costs of that SKU, order date in the org timezone, order currency)`. A line that already has a SKU is never selected, and an existing snapshot is never replaced. Each batch is its own tenant transaction; the loop ends when a batch is not full (which includes a batch that made no progress) or after `maxBatches`. The engine runs it after the products chain end has COMMITTED; a failure there never fails the run.
+- Known limitations (D10): a line linked while its SKU has NO cost component yet keeps a NULL snapshot (the link-up never invents a cost, and a set snapshot is never replaced), so its COGS is unknown until the owner adds a cost and `repriceOrderLines` (`packages/sync/src/cogs.ts`, the existing repair path: it recomputes the snapshots of a SKU's lines, optionally from a date, and is called after costs are added or edited) is run for that SKU. A link-up failure is swallowed: `SyncDeps` has no logger, so nothing is logged and nothing from the error is kept (it could carry connection or order details); the next products run repeats the pass, and the unmatched count on the Connections page (`unlinkedLines`) is the visible signal. If a worker-level log hook is added later it must log a fixed text only, never the error object.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -3776,14 +3915,17 @@ describe('order-line link-up after products', () => {
     if (first.kind !== 'next') throw new Error('expected a second page');
     const realDb = h.deps.db;
     let calls = 0;
-    // load (1), page transaction (2), then the link-up transaction (3) fails
+    // The tenant transactions of the second page job, in order: load (1), token read (2, the engine's default
+    // token service reads the credentials first), page transaction (3, it commits the cursor as `complete`),
+    // link-up (4) fails. Counting from the start of THIS job, not of the test.
     h.deps.db = {
       ...realDb,
       withTenant: (org: string, fn: Parameters<typeof realDb.withTenant>[1]) =>
-        ++calls >= 3 ? Promise.reject(new Error('link-up db down')) : realDb.withTenant(org, fn),
+        ++calls >= 4 ? Promise.reject(new Error('link-up db down')) : realDb.withTenant(org, fn),
     } as typeof realDb;
     expect(await processSyncPage(h.deps, first.job)).toEqual({ kind: 'done' });
     h.deps.db = realDb;
+    expect(calls).toBe(4); // the link-up WAS attempted (and failed) after the page transaction committed
     expect((await cursorRow('products')).status).toBe('complete');
     expect((await lineOf(orderId)).sku_id).toBeNull();
     h.clock.advance(60_000);
@@ -3930,8 +4072,8 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 ### Task 9: Per-resource sync status in the DTO and API
 
 **Files:**
-- Modify: `packages/shared/src/connections.ts`, `apps/api/src/connections/connections.service.ts` (`list`, `summarize`)
-- Test: `apps/api/test/connections.test.ts` (update one exact assertion, add a `describe`)
+- Modify: `packages/shared/src/connections.ts`, `apps/api/src/connections/connections.service.ts` (`list`, `summarize`), `apps/web/src/lib/connections.test.ts` (only the `sync()` helper, so `apps/web` still typechecks at this commit)
+- Test: `apps/api/test/connections.test.ts` (update TWO exact assertions, add a `describe`)
 
 **Interfaces:**
 - Produces (`@erq/shared`):
@@ -3962,7 +4104,37 @@ In `apps/api/test/connections.test.ts`, update the exact list expectation in `li
           unlinkedLines: 0,
         },
 ```
-and add a new `describe` at the end of the file:
+Also update the SECOND exact-equality test, `is never with no cursors, and reads historyLimited from the stored scopes` (around lines 984-998, inside `describe('sync summary')`): its first `expect(await summary(orgId, h, a)).toEqual({...})` lists every field of the sync object, so it now needs the two new ones. Replace that object with:
+
+```ts
+    expect(await summary(orgId, h, a)).toEqual({
+      state: 'never',
+      resource: null,
+      recordsProcessed: 0,
+      coveredFrom: null,
+      historyLimited: true,
+      error: null,
+      canStart: true,
+      resources: [
+        { resource: 'locations', state: 'never', lastCompletedAt: null, error: null },
+        { resource: 'products', state: 'never', lastCompletedAt: null, error: null },
+        { resource: 'inventory', state: 'never', lastCompletedAt: null, error: null },
+        { resource: 'orders', state: 'never', lastCompletedAt: null, error: null },
+      ],
+      unlinkedLines: 0,
+    });
+```
+(the four `never` entries are in the order locations, products, inventory, orders). The other tests in `describe('sync summary')` use `toMatchObject`, so they are unaffected; the web `sync()` helper is updated below.
+
+Update the web test helper in the same commit, because `ConnectionSyncDto` now has two required fields and `apps/web` must typecheck at every commit: in `apps/web/src/lib/connections.test.ts` change the `sync()` helper (lines 15-24) to add, after `canStart: true,`:
+
+```ts
+  resources: [],
+  unlinkedLines: 0,
+```
+(Task 10 then only changes that file's imports and adds its new tests; with `resources: []` every existing `describeSync` test behaves as before.)
+
+Then add a new `describe` at the end of the API test file:
 
 ```ts
 describe('per-resource sync status', () => {
@@ -4058,7 +4230,7 @@ describe('per-resource sync status', () => {
 
 - [ ] **Step 2: Run to see the failures**
 
-Run: `pnpm --filter @erq/api exec vitest run test/connections.test.ts -t "per-resource|lists connections without"`
+Run: `pnpm --filter @erq/api exec vitest run test/connections.test.ts -t "per-resource|lists connections without|is never with no cursors"`
 Expected: FAIL (`resources` and `unlinkedLines` are missing).
 
 - [ ] **Step 3: Implement**
@@ -4137,12 +4309,13 @@ cd "C:/Users/OK COMPUTER/Desktop/WorkAgentic/eRetailQuery" && pnpm turbo run bui
 pnpm --filter @erq/api exec vitest run test/connections.test.ts
 pnpm --filter @erq/api typecheck
 ```
-Expected: PASS (all existing sync-summary tests still pass because the aggregate fields did not change).
+Also run `pnpm --filter @erq/web typecheck` and `pnpm --filter @erq/web exec vitest run src/lib/connections.test.ts` (the helper change must keep every existing web test green).
+Expected: PASS. The two exact-equality tests (`lists connections without any credential fields...` and `is never with no cursors...`) were updated above; every other sync-summary test uses `toMatchObject` and the aggregate fields did not change, so they pass unchanged.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/shared apps/api
+git add packages/shared apps/api apps/web
 git commit -m "feat(api): report each resource's own sync status and count unlinked order lines
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
@@ -4168,7 +4341,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 - [ ] **Step 1: Write the failing tests**
 
-In `apps/web/src/lib/connections.test.ts` update the helper (the DTO gained two required fields) and the imports:
+In `apps/web/src/lib/connections.test.ts` update the imports (the `sync()` helper already got `resources: []` and `unlinkedLines: 0` in Task 9, so it is shown here only for reference; do not change it twice):
 
 ```ts
 import { SHOPIFY_ERROR_CODES, type ConnectionDto, type ConnectionResourceDto, type ConnectionSyncDto } from '@erq/shared';
@@ -4464,14 +4637,15 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 **Files:**
 - Create: `packages/db/src/schema/alerts.ts`; generated `packages/db/migrations/0025_alerts_and_sweep_retries.sql`; custom `packages/db/migrations/0026_alerts_rls_and_sweep.sql`; `apps/worker/src/webhooks/alerts.ts`
 - Modify: `packages/db/src/schema/webhooks.ts`, `packages/db/src/schema/index.ts`, `packages/db/test/fixtures.ts`, `apps/worker/src/webhooks/handler.ts`, `apps/worker/src/webhooks/sweep.ts`, `apps/worker/src/main.ts`, `packages/shared/src/connections.ts`, `apps/api/src/connections/connections.service.ts`, `apps/web/src/lib/connections.ts`, `apps/web/src/app/(app)/connections/page.tsx`
-- Test: `packages/db/test/alerts-schema.test.ts` (create), `packages/db/test/webhook-sweep-retries.test.ts` (create), `apps/worker/test/webhook-failure.test.ts` (create), `apps/worker/test/webhook-sweep.test.ts` (update deps), `apps/api/test/connections.test.ts` (update one, add), `apps/web/src/lib/connections.test.ts` (add)
+- Test: `packages/db/test/alerts-schema.test.ts` (create), `packages/db/test/webhook-sweep-retries.test.ts` (create), `apps/worker/test/webhook-failure.test.ts` (create), `apps/worker/test/webhook-sweep.test.ts` (update deps), `apps/api/test/connections.test.ts` (update one, add), `apps/web/src/lib/connections.test.ts` (add), `packages/db/test/shopify-tables.test.ts` (update the privacy-listing test: a failed `app/uninstalled` row is now listed), `apps/worker/test/webhook-sweep.test.ts` (also update the "never other failed topics" test and its expected count)
+- Also note (D1/D9): `packages/db/src/connections-api.ts` (doc comment of `listStaleWebhookEvents` only)
 
 **Interfaces:**
-- Produces (db): `webhookEvents.sweepRetries` (`integer not null default 0`, column `sweep_retries`); table `alerts` (`id`, `org_id`, `type text`, `severity alert_severity ('low','medium','high')`, `store_connection_id uuid` with composite FK to `store_connections` on delete cascade, `entity_ref text`, `message text`, `resolved_at timestamptz`, timestamps) with partial unique index `alerts_open_uq` on `(org_id, type, entity_ref) WHERE resolved_at IS NULL`; Drizzle `alerts`, `alertSeverity`. SQL: `app_list_stale_webhook_events(timestamptz, integer)` replaced (same signature): additionally lists `failed` events of NON-privacy topics whose `sweep_retries < 5` and whose `updated_at` is older than the cutoff; privacy topics stay unlimited.
-- Produces (worker): `WEBHOOK_SWEEP_MAX_RETRIES = 5` (must equal the literal in the SQL), `MANDATORY_PRIVACY_TOPICS`, `webhookAlertFor(topic: string): { severity: 'high' | 'medium'; message: string }`, `raiseWebhookAlertIfExhausted(tx, args)`; `SweepDeps.db: TenantDb` (the sweep bumps `sweep_retries` for every failed non-privacy event it re-enqueues).
+- Produces (db): `webhookEvents.sweepRetries` (`integer not null default 0`, column `sweep_retries`); table `alerts` (`id`, `org_id`, `type text`, `severity alert_severity ('low','medium','high')`, `store_connection_id uuid` with composite FK to `store_connections` on delete cascade, `entity_ref text`, `message text`, `resolved_at timestamptz`, timestamps) with partial unique index `alerts_open_uq` on `(org_id, type, entity_ref) WHERE resolved_at IS NULL`; Drizzle `alerts`, `alertSeverity`. SQL: `app_list_stale_webhook_events(timestamptz, integer)` replaced (same signature): additionally lists `failed` events of exactly the three LIVE topics this plan subscribes to (`app/uninstalled`, `products/update`, `inventory_levels/update`) whose `sweep_retries < 5` and whose `updated_at` is older than the cutoff; privacy topics stay unlimited. Any other failed topic (for example a stray `orders/updated`, which the receiver stores as `deferred` and never runs) stays unlisted, so an unknown topic is never retried or alerted on.
+- Produces (worker): `WEBHOOK_SWEEP_MAX_RETRIES = 5` (must equal the literal in the SQL), `MANDATORY_PRIVACY_TOPICS`, `webhookAlertFor(topic: string): { severity: 'high' | 'medium'; message: string }`, `raiseWebhookAlertIfExhausted(tx, args)`; `SweepDeps.db: TenantDb` (the sweep bumps `sweep_retries` for every failed live-topic event it re-enqueues).
 - Produces (shared): `ConnectionAlertDto { id: string; severity: 'low' | 'medium' | 'high'; message: string }`, `ConnectionDto.alerts: ConnectionAlertDto[]` (open `webhook_failed` alerts, highest severity first).
 - Produces (web): `connectionAlerts(c: Pick<ConnectionDto, 'alerts'>): ConnectionAlertDto[]`.
-- Rules: the alert is written when a failed event whose `sweep_retries >= 5` fails again (its handler run ends in `failed`); exactly once per event (partial unique index plus `ON CONFLICT DO NOTHING`); never for privacy topics; the message is a FIXED text per topic (high for `app/uninstalled`: `Shopify could not tell us the shop uninstalled. Reconnect if you removed the app.`; medium otherwise: `A live update from Shopify could not be applied. We still check your store every 15 minutes, so nothing is lost.`), never the error text. A reconnect or a disconnect resolves the connection's open alerts.
+- Rules: the alert is written when a handler run fails with `sweep_retries >= 5` (its run ends in `failed`, the alert is written in the same transaction as the status; documented limitation: an event whose final retry never executes, for example because the queue is down, leaves no alert, and it is never retried again because it has left the budget; the next poll still covers the data); exactly once per event (partial unique index plus `ON CONFLICT DO NOTHING`); never for privacy topics; the message is a FIXED text per topic (high for `app/uninstalled`: `Shopify could not tell us the shop uninstalled. Reconnect if you removed the app.`; medium otherwise: `A live update from Shopify could not be applied. We still check your store every 15 minutes, so nothing is lost.`), never the error text. A reconnect or a disconnect resolves the connection's open alerts.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -4603,13 +4777,16 @@ const listed = async () =>
   (await api.listStaleWebhookEvents(new Date(Date.now() - 10 * 60_000), 100)).map((e) => e.eventId).sort();
 
 describe('app_list_stale_webhook_events with a retry limit', () => {
-  it('re-lists a failed non-privacy event only while it has retries left and has cooled down for 10 minutes', async () => {
+  it('re-lists a failed live-topic event only while it has retries left and has cooled down for 10 minutes', async () => {
     const fresh = await add('app/uninstalled', 'failed', 0, 5);
     const first = await add('app/uninstalled', 'failed', 0, 20);
     const fourth = await add('products/update', 'failed', 4, 20);
     const exhausted = await add('products/update', 'failed', 5, 20);
     const beyond = await add('app/uninstalled', 'failed', 9, 20);
-    expect(await listed()).toEqual([first, fourth].sort());
+    const inventory = await add('inventory_levels/update', 'failed', 0, 20);
+    const stray = await add('orders/updated', 'failed', 0, 20); // not a live topic: never retried
+    expect(await listed()).toEqual([first, fourth, inventory].sort());
+    expect(await listed()).not.toContain(stray);
     expect(await listed()).not.toContain(fresh);
     expect(await listed()).not.toContain(exhausted);
     expect(await listed()).not.toContain(beyond);
@@ -4753,7 +4930,7 @@ describe('the sweep retry budget', () => {
     clock.ms = Date.parse('2026-10-08T12:00:00.000Z');
   });
 
-  it('retries a failed non-privacy event at most 5 times, one every 10 minutes, and counts each retry', async () => {
+  it('retries a failed live-topic event at most 5 times, one every 10 minutes, and counts each retry', async () => {
     const id = await addEvent('app/uninstalled', { status: 'failed', minutesOld: 30 });
     for (let attempt = 1; attempt <= 5; attempt += 1) {
       expect(await sweep(), `sweep ${attempt}`).toBe(1);
@@ -4823,7 +5000,9 @@ describe('the alert at exhaustion', () => {
 ```
 (`NOW` is a `Date` mutated by the first sweep test and restored; if ESLint objects to mutating a `const`, make `NOW` a `let` clock helper `clock = { ms: Date.parse(...) }` and pass `() => new Date(clock.ms)`.)
 
-In `apps/worker/test/webhook-sweep.test.ts` add `db` (a `createTenantDb(tdb.appUrl)` created in the file's `beforeAll` and closed in `afterAll`) to every `sweepStaleWebhookEvents({...})` call: the sweep now bumps `sweep_retries` and needs it.
+In `apps/worker/test/webhook-sweep.test.ts` add `db` (the file already has a tenant `db`; reuse it) to every `sweepStaleWebhookEvents({...})` call: the sweep now bumps `sweep_retries` and needs it. Also update the test `lists failed customers/redact and customers/data_request too, but never other failed topics` (around lines 140-158): its rows `f-3` (`orders/updated`) and `f-4` (`app/uninstalled`), both failed 30 minutes ago, now behave differently, because `app/uninstalled` is a live topic with `sweep_retries` 0. Rename it `lists failed privacy events and failed live-topic events, but never other failed topics`, capture the id of `f-4` (`const uninst = (await ins('app/uninstalled', 'f-4')).rows[0].id as string;`), and expect `n` to be `3` and `jobs.map((j) => j.eventId).sort()` to equal `[cust, data, uninst].sort()`; `orders/updated` (`f-3`) stays unlisted.
+
+In `packages/db/test/shopify-tables.test.ts` (it asserts the 0021 function, which 0026 replaces): the test `lists old received and stale processing events...` (lines 115-150) uses topic `'t'` for its failed row, which is not a live topic, so it needs NO change and keeps proving that an unknown failed topic is never listed. The test `also lists failed privacy events (mandatory erasure) once their last attempt is older than the cutoff` (lines 151-177) changes: row `n-uninst` (`app/uninstalled`, failed, `sweep_retries` 0, last attempt 3 hours ago) is now listed, and being the oldest attempt it comes FIRST. Rename the test `lists failed privacy events and failed live-topic events once their last attempt is older than the cutoff (other topics never)`, include `'n-uninst'` in the `external_event_id in (...)` lookup, and make the expectation `[A n-uninst, A p-shop, A p-cust, B p-data]` (`n-fail`, the `orders/updated` row, stays unlisted; `p-recent` and `p-done` too). The comment above the expectation becomes: `// Oldest last attempt first; a recent failure waits for the next window; only privacy and live topics are retried.`
 
 In `apps/api/test/connections.test.ts`: add `alerts: []` to the exact list expectation next to `sync` (test `lists connections without any credential fields...`), and add:
 
@@ -4927,7 +5106,7 @@ Expected: FAIL (no `alerts` table, no `sweep_retries`, no `alerts.ts`).
 `packages/db/src/schema/webhooks.ts`: in `webhookEvents` after `error`:
 
 ```ts
-    /** How many times the sweep re-enqueued this FAILED event (non-privacy topics stop at 5; privacy topics never stop). */
+    /** How many times the sweep re-enqueued this FAILED event (live topics stop at 5; privacy topics never stop; other topics are never retried). */
     sweepRetries: integer('sweep_retries').notNull().default(0),
 ```
 (add `integer` to the `drizzle-orm/pg-core` import).
@@ -4987,9 +5166,11 @@ Expected: `0025_alerts_and_sweep_retries.sql` (the enum, the `alerts` table, its
 ```sql
 SELECT app_secure_tenant_table('alerts');
 --> statement-breakpoint
--- Replaces the 0021 definition (same signature). Failed events of NON-privacy topics are re-listed too, but only
--- while they have retries left (sweep_retries < 5, kept in line with WEBHOOK_SWEEP_MAX_RETRIES in
--- apps/worker/src/webhooks/alerts.ts) and after their last attempt is older than the cutoff. Privacy topics
+-- Replaces the 0021 definition (same signature). Failed events of the three LIVE topics (app/uninstalled,
+-- products/update, inventory_levels/update: keep this list in line with the subscribed topics in
+-- packages/connectors/src/shopify/webhooks.ts) are re-listed too, but only while they have retries left
+-- (sweep_retries < 5, kept in line with WEBHOOK_SWEEP_MAX_RETRIES in apps/worker/src/webhooks/alerts.ts) and after
+-- their last attempt is older than the cutoff. Any other failed topic is NOT listed. Privacy topics
 -- (keep this list in line with MANDATORY_PRIVACY_TOPICS in the same file) stay unlimited.
 CREATE OR REPLACE FUNCTION app_list_stale_webhook_events(p_older_than timestamptz, p_limit integer)
 RETURNS TABLE (o_org_id uuid, o_event_id uuid)
@@ -5001,7 +5182,7 @@ LANGUAGE sql SECURITY DEFINER SET search_path = pg_catalog, public, pg_temp AS $
          AND topic IN ('customers/data_request', 'customers/redact', 'shop/redact')
          AND updated_at < p_older_than)
      OR (status = 'failed'
-         AND topic NOT IN ('customers/data_request', 'customers/redact', 'shop/redact')
+         AND topic IN ('app/uninstalled', 'products/update', 'inventory_levels/update')
          AND sweep_retries < 5
          AND updated_at < p_older_than)
   ORDER BY CASE WHEN status = 'received' THEN received_at ELSE updated_at END
@@ -5029,9 +5210,14 @@ END $$;
 import { alerts, webhookEvents, type Tx } from '@erq/db';
 import { and, eq } from 'drizzle-orm';
 
-/** Sweep retries a failed non-privacy event gets before it stays failed and raises an alert. Must equal the literal in migration 0026. */
+/** Sweep retries a failed live-topic event gets before it stays failed and raises an alert. Must equal the literal in migration 0026. */
 export const WEBHOOK_SWEEP_MAX_RETRIES = 5;
-/** Mandatory privacy topics: retried without limit and never alerted on here. Must match migrations 0021 and 0026. */
+/**
+ * Mandatory privacy topics: retried without limit and never alerted on here. This list must match the privacy
+ * branch of migrations 0021 and 0026. Migration 0026 lists the budgeted (non-privacy) retries by the three LIVE
+ * topics instead (`app/uninstalled`, `products/update`, `inventory_levels/update`), so any other failed topic is
+ * never retried.
+ */
 export const MANDATORY_PRIVACY_TOPICS = ['customers/data_request', 'customers/redact', 'shop/redact'] as const;
 
 export function webhookAlertFor(topic: string): { severity: 'high' | 'medium'; message: string } {
@@ -5097,7 +5283,7 @@ export async function raiseWebhookAlertIfExhausted(
 ```ts
   for (const job of stale) {
     try {
-      // Every re-enqueue of a failed non-privacy event spends one of its retries (the update also restarts the
+      // Every re-enqueue of a failed live-topic event spends one of its retries (the update also restarts the
       // 10 minute cool-down through the updated_at trigger). Received, processing and privacy events are untouched.
       await deps.db.withTenant(job.orgId, (tx) =>
         tx
@@ -5119,7 +5305,7 @@ export async function raiseWebhookAlertIfExhausted(
     }
   }
 ```
-`apps/worker/src/main.ts`: pass `db` in the `sweepStaleWebhookEvents({ connections, enqueuer, db, onError: ... })` call. Also set the doc comment of the sweep (it now also re-lists failed non-privacy events within the retry budget).
+`apps/worker/src/main.ts`: pass `db` in the `sweepStaleWebhookEvents({ connections, enqueuer, db, onError: ... })` call. Also set the doc comment of the sweep (it now also re-lists failed live-topic events within the retry budget).
 
 `packages/shared/src/connections.ts`: add
 
@@ -5175,7 +5361,8 @@ In `completeInstall` call `await resolveAlerts(tx, orgId, row.id);` inside the s
 `apps/web/src/lib/connections.ts`:
 
 ```ts
-import type { ConnectionAlertDto } from '@erq/shared';
+// Merge `ConnectionAlertDto` into the file's existing `@erq/shared` type import (do not add a second import line):
+// import type { ConnectionAlertDto, ConnectionDto, ConnectionResourceDto, ConnectionSyncDto } from '@erq/shared';
 
 const SEVERITY_RANK = { high: 0, medium: 1, low: 2 } as const;
 /** Open alerts of a connection, highest severity first (the order within a severity is kept). */
@@ -5209,7 +5396,7 @@ pnpm --filter @erq/api exec vitest run test/connections.test.ts
 pnpm --filter @erq/web exec vitest run src/lib/connections.test.ts
 pnpm --filter @erq/worker typecheck && pnpm --filter @erq/api typecheck && pnpm --filter @erq/web typecheck
 ```
-Expected: PASS. `shopify-tables.test.ts` already exercises the 0021 privacy listing; its privacy assertions must still hold (the new function keeps that branch). If it asserts that a failed non-privacy event is NEVER listed, update that assertion to the new rule (listed while `sweep_retries < 5`) and say so in the commit body.
+Expected: PASS. `shopify-tables.test.ts` and `webhook-sweep.test.ts` assert the replaced listing: they were updated in Step 1 (a failed `app/uninstalled` row is now listed; `orders/updated` and unknown topics stay unlisted), and the commit body says so. Also update the doc comment of `listStaleWebhookEvents` in `packages/db/src/connections-api.ts` to add: "... or failed events of the live topics (app/uninstalled, products/update, inventory_levels/update) that still have sweep retries left (migration 0026)".
 
 - [ ] **Step 6: Commit**
 
@@ -5227,7 +5414,7 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 ### Task 12: Documentation and final verification
 
 **Files:**
-- Modify: `docs/sync.md`, `docs/shopify-connection.md`, `CLAUDE.md`
+- Modify: `docs/sync.md`, `docs/shopify-connection.md`, `CLAUDE.md`, `.env.example` (comment only)
 - No new tests: this task is the full-repository verification.
 
 **Interfaces:** none produced. Consumes everything above.
@@ -5240,22 +5427,22 @@ Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"
 
 - **Scheduler.** A repeatable job `schedule-tick` (scheduler id `sync-tick`, every 60 s) calls `runSchedulerTick` (`packages/sync/src/schedule/tick.ts`). It reads `app_list_due_sync_resources(now, 50)` (worker only, never an API route), re-checks each connection with the pure `dueResources`, and starts chains with `enqueueSync`: one incremental chain, plus a `full` chain of products and inventory when the daily products pass is due. Cadences: locations, products and orders 15 minutes; inventory 60 minutes (a full pass); products full pass every 24 hours; at most 50 connections per tick (oldest first). A connection is skipped unless it is an `active` Shopify connection with credentials, all four resources have completed once, and no cursor is `running`. A `failed` cursor waits one cadence from its last attempt. Errors for one connection are sanitized, reported and do not stop the tick.
 - **Idle token refresh.** `app_list_idle_refresh_connections` lists active connections whose refresh token expires within 14 days and whose access token is expired or about to be; the tick renews them inline through the token service. A final refusal sets the connection to `error` with the reconnect text.
-- **Token service.** `createTokenService` (`packages/sync/src/tokens.ts`): refresh when the access token has 5 minutes or less left, under `SELECT ... FOR UPDATE` on the connection row, re-reading after the lock, writing the rotated pair and both expiry columns in the same transaction. The engine calls it before every fetch and gives the connector only `{ accessToken }`. Residual risk: if Shopify answers but the commit fails, the rotated token is lost and the shop must be reconnected.
-- **Webhook nudges.** `products/update` nudges products and `inventory_levels/update` nudges inventory (`apps/worker/src/webhooks/nudge.ts`): an incremental sync of that resource, dropped unless the connection is `active`, fully imported once, has no running cursor, and the resource did not complete (or fail) within 60 s. Order, refund and customer topics are not subscribed (protected customer data approval), so orders are polled every 15 minutes. The daily products tick also re-registers the webhook subscriptions (idempotent).
-- **Link-up pass.** After a products chain end commits, `linkOrderLines` links order lines of that connection that have no SKU but a variant with a channel listing, filling the cost snapshot with the cost in effect on the order date in the org timezone; idempotent, bounded (500 per batch, 200 batches), never overwrites a link or snapshot, best effort.
+- **Token service.** `createTokenService` (`packages/sync/src/tokens.ts`): refresh when the access token has 5 minutes or less left, under `SELECT ... FOR NO KEY UPDATE` on the connection row (not `FOR UPDATE`: child tables take `FOR KEY SHARE` on that row, which `FOR UPDATE` would block for the whole HTTP call; the chain-end health lock uses the same mode), re-reading after the lock, writing the rotated pair and both expiry columns in the same transaction. The transaction sets `lock_timeout` 5 s and `statement_timeout` 30 s because it holds a pooled connection and a row lock during the 10 s HTTP call; a lock timeout is a `TransientError` (the queue retries, nothing changed). The engine calls it before every fetch and gives the connector only `{ accessToken }`. A non-401, non-transient refresh answer (for example a `400`) fails the run WITHOUT marking the connection `error`, and the next poll retries (accepted); only a final `401` asks for a reconnect. Residual risk: if Shopify answers but the commit fails, the rotated token is lost and the shop must be reconnected.
+- **Webhook nudges.** `products/update` nudges products and `inventory_levels/update` nudges inventory (`apps/worker/src/webhooks/nudge.ts`): an incremental sync of that resource, dropped unless the connection is `active`, fully imported once, has no running cursor, and the resource did not complete (or fail) within its debounce window: 60 s, except inventory, which waits 10 minutes because its sync is a full pass over every level. Order, refund and customer topics are not subscribed (protected customer data approval), so orders are polled every 15 minutes. The daily products tick also re-registers the webhook subscriptions (idempotent).
+- **Link-up pass.** After a products chain end commits, `linkOrderLines` links order lines of that connection that have no SKU but a variant with a channel listing, filling the cost snapshot with the cost in effect on the order date in the org timezone; idempotent, bounded (500 per batch, 200 batches), never overwrites a link or snapshot, best effort (a failure is swallowed without logging data and the next products run repeats it). A line linked while its SKU has no cost keeps a NULL snapshot; `repriceOrderLines` (run after costs are added or edited) is the repair path.
 - **Per-resource status.** `ConnectionSyncDto.resources` (one entry per resource: state, last completion, error) and `unlinkedLines`; `store_connections.last_synced_at` is the OLDEST of the four resource times and only exists once all four have completed.
-- **Failed webhook events.** The sweep re-lists failed non-privacy events after 10 minutes, at most 5 times (`webhook_events.sweep_retries`), then one `alerts` row (`webhook_failed`, high for `app/uninstalled`) is written and the Connections page shows it until a reconnect or disconnect. Privacy topics keep their unlimited retry.
+- **Failed webhook events.** The sweep re-lists failed events of the three live topics (`app/uninstalled`, `products/update`, `inventory_levels/update`) after 10 minutes, at most 5 times (`webhook_events.sweep_retries`); any other failed topic is never retried. When a handler run then fails with `sweep_retries >= 5`, one `alerts` row (`webhook_failed`, `entity_ref` `webhook_event:<id>`, `store_connection_id` the connection; high for `app/uninstalled`) is written in the same transaction, and the Connections page shows it until a reconnect or disconnect. Limitation: an event whose final retry never executes (for example the queue is down) leaves no alert. Privacy topics keep their unlimited retry.
 - **Migrations:** 0022 token expiry columns, 0023 `sync_cursors.last_full_pass_at`, 0024 the two scheduler functions, 0025 `sweep_retries` and `alerts`, 0026 alerts RLS and the replaced sweep function.
 
-The second section lists what is still open: the `then` chain is still not persisted (a resumed run finishes only its resource; the scheduler heals the rest on the next cadence); a nudge arriving within 60 s after a run is dropped until the next poll; on the daily tick orders may run before the products full pass finishes (the link-up repairs lines); orders have a 15-minute latency until protected customer data approval exists; the connection-health row lock now has an interleaving test (closed); `coveredFrom` index, audit-after-start and the other items from the previous list that this task did not touch stay as they were (copy them over unchanged).
+The second section lists what is still open: the `then` chain is still not persisted (a resumed run finishes only its resource; the scheduler heals the rest on the next cadence); a nudge arriving within its debounce window after a run (60 s; inventory 10 minutes) is dropped until the next poll; on the daily tick orders may run before the products full pass finishes (the link-up repairs lines); orders have a 15-minute latency until protected customer data approval exists; the connection-health row lock now has an interleaving test (closed); `coveredFrom` index, audit-after-start and the other items from the previous list that this task did not touch stay as they were (copy them over unchanged).
 
 - [ ] **Step 2: Update `docs/shopify-connection.md`**
 
-(a) Section 3 (Environment variables): the worker now also reads `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET` (token refresh; without them an expiring token that needs refreshing fails the run with "Token refresh is not configured on this server.") and `API_PUBLIC_URL` (the webhook callback for the daily re-register; without it nothing is re-registered).
+(a) Section 3 (Environment variables): the worker now also reads `SHOPIFY_API_KEY` and `SHOPIFY_API_SECRET` (token refresh; without them an expiring token that needs refreshing fails the run with "Token refresh is not configured on this server.") and `API_PUBLIC_URL` (the webhook callback for the daily re-register; without it nothing is re-registered). Also update the comment above `SHOPIFY_API_KEY`/`SHOPIFY_API_SECRET`/`API_PUBLIC_URL` in `.env.example` (the variables already exist there) to say the WORKER reads them too: the key and secret for token refresh, `API_PUBLIC_URL` for the webhook re-registration.
 (b) Section 5 (Webhooks): the subscribed topics are `app/uninstalled`, `products/update`, `inventory_levels/update`; the product and stock topics only nudge a sync and are scrubbed to `{}`; the other data topics are still `deferred`.
 (c) Section 6 (Credentials): the encrypted blob is `{ accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt }` for expiring tokens (the old `{ accessToken }` shape is read as non-expiring and never refreshed); the two expiry times are mirrored in `store_connections.access_token_expires_at` and `refresh_token_expires_at`; the install sends `expiring=1`; refresh rotates both tokens and is serialised by the connection row lock; a final `401` marks the connection `error` with "Shopify no longer accepts this connection. Reconnect the store."
 (d) Section 8 (Known gaps): remove "Shopify token refresh is deferred to 1b-3c"; the "failed webhook events are never swept" item becomes "retried 5 times then alerted".
-(e) Section 10 (First-install checklist), add these unverified items: the `expiring=1` exchange answer (`expires_in`, `refresh_token`, `refresh_token_expires_in`); the refresh request and its rotation, and that a replayed refresh token gives `401 {"error":"invalid_request"}`; that `products/update` and `inventory_levels/update` subscriptions are accepted without protected customer data approval and that their delivery nudges within seconds; the `webhookSubscriptionCreate` request shape (`URL!` variable, `format: JSON`) now used three times per connect; the real query cost of the 15-minute polling against the 1000-point bucket with several shops (`extensions.cost.actualQueryCost`); that the BullMQ job scheduler `sync-tick` runs exactly one tick per minute across worker restarts and several worker instances; that the nudge and the sweep work through real BullMQ; that the connection row lock held across the Shopify refresh call does not exhaust the Postgres pool under load.
+(e) Section 10 (First-install checklist), add these unverified items: the `expiring=1` exchange answer (`expires_in`, `refresh_token`, `refresh_token_expires_in`); the refresh request and its rotation, and that a replayed refresh token gives `401 {"error":"invalid_request"}`; that `products/update` and `inventory_levels/update` subscriptions are accepted without protected customer data approval and that their delivery nudges within seconds; the `webhookSubscriptionCreate` request shape (`URL!` variable, `format: JSON`) now used three times per connect; the real query cost of the 15-minute polling against the 1000-point bucket with several shops (`extensions.cost.actualQueryCost`); that the BullMQ job scheduler `sync-tick` runs exactly one tick per minute across worker restarts and several worker instances; that the nudge and the sweep work through real BullMQ; that the connection row lock held across the Shopify refresh call does not exhaust the Postgres pool under load (it is `FOR NO KEY UPDATE` with a 5 s lock timeout and 30 s statement timeout); the real volume of `inventory_levels/update` events on a busy shop against the 10-minute inventory nudge debounce (does the hourly poll plus nudges stay within the 1000-point bucket).
 
 - [ ] **Step 3: Update `CLAUDE.md`**
 
@@ -5296,7 +5483,7 @@ Expected: builds. Clean up straight away: `rm -rf "apps/web/.next" ".turbo"` and
 Check that the first-install checklist in `docs/shopify-connection.md` section 10 contains every item listed in Step 2(e), and that `git status` shows only intended files (no `.next`, `.turbo` or temp output).
 
 ```bash
-git add docs CLAUDE.md
+git add docs CLAUDE.md .env.example
 git commit -m "docs: document live updates, token refresh and the new first-install checklist items
 
 Co-Authored-By: Claude Sonnet 5.5 <noreply@anthropic.com>"

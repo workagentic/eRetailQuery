@@ -1,17 +1,28 @@
 import { UnrecoverableError } from 'bullmq';
-import { parseSyncPageJob, processSyncPage, resumeStalledRuns, type SyncDeps } from '@erq/sync';
+import {
+  parseSyncPageJob,
+  processSyncPage,
+  resumeStalledRuns,
+  runSchedulerTick,
+  type SchedulerDeps,
+} from '@erq/sync';
 
 const STALL_AFTER_MS = 10 * 60 * 1000;
 
-/** The queue-facing logic: validate, process one page, enqueue what comes next. */
+/** The queue-facing logic: validate, process one page, enqueue what comes next; or run a scheduled job. */
 export async function handleSyncJob(
-  deps: SyncDeps,
+  deps: SchedulerDeps,
   job: { name: string; data: unknown },
-  impl: { processSyncPage: typeof processSyncPage; resumeStalledRuns: typeof resumeStalledRuns } = {
-    processSyncPage,
-    resumeStalledRuns,
-  },
+  impl: {
+    processSyncPage: typeof processSyncPage;
+    resumeStalledRuns: typeof resumeStalledRuns;
+    runSchedulerTick?: typeof runSchedulerTick;
+  } = { processSyncPage, resumeStalledRuns },
 ): Promise<void> {
+  if (job.name === 'schedule-tick') {
+    await (impl.runSchedulerTick ?? runSchedulerTick)(deps);
+    return;
+  }
   if (job.name === 'resume-stalled') {
     const now = (deps.now ?? (() => new Date()))();
     await impl.resumeStalledRuns(deps, new Date(now.getTime() - STALL_AFTER_MS));

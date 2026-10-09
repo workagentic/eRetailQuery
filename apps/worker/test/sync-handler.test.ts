@@ -61,4 +61,24 @@ describe('handleSyncJob', () => {
     await handleSyncJob(deps, { name: 'resume-stalled', data: {} }, impl);
     expect(impl.resumeStalledRuns).toHaveBeenCalledWith(deps, new Date('2026-10-06T11:50:00Z'));
   });
+  it('runs the scheduler tick for the schedule-tick job and never treats it as a page payload', async () => {
+    const { deps, impl } = setup({ kind: 'done' });
+    const tick = vi.fn(async () => ({ connections: 0, enqueued: 0, failed: 0, refreshed: 0 }));
+    await handleSyncJob(
+      deps,
+      { name: 'schedule-tick', data: {} },
+      { ...impl, runSchedulerTick: tick },
+    );
+    expect(tick).toHaveBeenCalledWith(deps);
+    expect(impl.processSyncPage).not.toHaveBeenCalled();
+  });
+  it('lets a failing tick reject so BullMQ records the failure', async () => {
+    const { deps, impl } = setup({ kind: 'done' });
+    const tick = vi.fn(async () => {
+      throw new Error('db down');
+    });
+    await expect(
+      handleSyncJob(deps, { name: 'schedule-tick', data: {} }, { ...impl, runSchedulerTick: tick }),
+    ).rejects.toThrow('db down');
+  });
 });

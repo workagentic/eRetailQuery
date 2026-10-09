@@ -12,6 +12,23 @@ export const safeMessage = (error: unknown): string => sanitizeMessage(error, 50
  */
 export const IMPORT_NOT_STARTED_MESSAGE = 'Could not start the first import. Use Sync now.';
 
+/** Flags a connection as errored. Only active, pending and error connections change: a disconnected or demo connection must never become `error` (it would escape the active-shop unique index). */
+export async function markConnectionError(
+  tx: Tx,
+  connectionId: string,
+  message: string,
+): Promise<void> {
+  await tx
+    .update(storeConnections)
+    .set({ status: 'error', lastError: message })
+    .where(
+      and(
+        eq(storeConnections.id, connectionId),
+        inArray(storeConnections.status, ['active', 'pending', 'error']),
+      ),
+    );
+}
+
 /** Marks the job's run and cursor failed (only if that run is still the current one). Optionally flags the connection. */
 export async function failRun(
   tx: Tx,
@@ -34,18 +51,7 @@ export async function failRun(
     .update(syncRuns)
     .set({ status: 'failed', error: message, finishedAt: now })
     .where(and(eq(syncRuns.id, job.syncRunId), eq(syncRuns.status, 'running')));
-  if (opts.connectionError) {
-    await tx
-      .update(storeConnections)
-      .set({ status: 'error', lastError: message })
-      // A disconnected or demo connection must never become `error` (it would escape the active-shop unique index).
-      .where(
-        and(
-          eq(storeConnections.id, job.connectionId),
-          inArray(storeConnections.status, ['active', 'pending', 'error']),
-        ),
-      );
-  }
+  if (opts.connectionError) await markConnectionError(tx, job.connectionId, message);
 }
 
 /**

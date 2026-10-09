@@ -18,3 +18,4 @@ export * from './job-schema';
 export * from './tokens';
 export * from './schedule/cadence';
 export * from './schedule/due';
+export * from './schedule/tick';

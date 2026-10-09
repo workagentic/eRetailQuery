@@ -5,12 +5,12 @@ import IORedis from 'ioredis';
 import { sanitizeMessage } from '@erq/connectors';
 import { createConnectionsApi, createTenantDb, type TenantDb } from '@erq/db';
 import { createLogger, EnvKeyProvider, WEBHOOK_QUEUE } from '@erq/shared';
-import type { SyncDeps } from '@erq/sync';
+import type { SchedulerDeps } from '@erq/sync';
 import { BullMqJobQueue, SYNC_QUEUE } from './sync/bullmq-queue';
 import { createWorkerConnectors } from './sync/connectors';
 import { RedisRateLimiter } from './sync/redis-rate-limiter';
-import { createWorkerTokenService } from './sync/tokens';
-import { createSyncWorker, scheduleResumeStalled } from './sync/worker';
+import { createWorkerTokenService, workerRefreshFn } from './sync/tokens';
+import { createSyncWorker, scheduleResumeStalled, scheduleSyncTick } from './sync/worker';
 import { createSystemWorker, SYSTEM_QUEUE } from './system-worker';
 import { processWebhookEvent } from './webhooks/handler';
 import { sweepStaleWebhookEvents } from './webhooks/sweep';
@@ -46,23 +46,27 @@ async function main(): Promise<void> {
   if (db && process.env.ENCRYPTION_KEY) {
     syncQueue = new Queue(SYNC_QUEUE, { connection });
     const keyProvider = EnvKeyProvider.fromEnv(process.env);
-    if (!process.env.SHOPIFY_API_KEY || !process.env.SHOPIFY_API_SECRET) {
+    // Same check (trimmed) as the refresh function itself, so the warning and the behaviour agree.
+    if (workerRefreshFn(process.env) === undefined) {
       log.warn(
         'SHOPIFY_API_KEY or SHOPIFY_API_SECRET is missing: expiring Shopify tokens cannot be refreshed',
       );
     }
-    const deps: SyncDeps = {
+    const deps: SchedulerDeps = {
       db,
       connectors: createWorkerConnectors(process.env),
       limiter: new RedisRateLimiter(connection),
       queue: new BullMqJobQueue(syncQueue),
       keyProvider,
       tokens: createWorkerTokenService(process.env, db, keyProvider),
+      // Messages are sanitized by the tick (no tokens); they name the connection only.
+      onError: (message) => log.warn({ err: message }, 'sync tick problem'),
     };
     syncWorker = createSyncWorker(deps, connection, {
       concurrency: Number(process.env.SYNC_CONCURRENCY ?? 5),
     });
     await scheduleResumeStalled(syncQueue);
+    await scheduleSyncTick(syncQueue);
   } else {
     log.info('sync worker disabled');
   }

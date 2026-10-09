@@ -1,10 +1,10 @@
 import { UnrecoverableError, Worker, type ConnectionOptions, type Queue } from 'bullmq';
-import { failSyncRun, parseSyncPageJob, type SyncDeps } from '@erq/sync';
+import { failSyncRun, parseSyncPageJob, SYNC_TICK_EVERY_MS, type SchedulerDeps } from '@erq/sync';
 import { SYNC_QUEUE } from './bullmq-queue';
 import { handleSyncJob } from './handler';
 
 export function createSyncWorker(
-  deps: SyncDeps,
+  deps: SchedulerDeps,
   connection: ConnectionOptions,
   opts: { concurrency?: number } = {},
 ): Worker {
@@ -34,5 +34,14 @@ export async function scheduleResumeStalled(queue: Queue): Promise<void> {
     'resume-stalled',
     { every: 300_000 },
     { name: 'resume-stalled', data: {} },
+  );
+}
+
+/** Every 60 seconds the ticker starts what is due. The fixed scheduler id keeps restarts from multiplying it. */
+export async function scheduleSyncTick(queue: Queue): Promise<void> {
+  await queue.upsertJobScheduler(
+    'sync-tick',
+    { every: SYNC_TICK_EVERY_MS },
+    { name: 'schedule-tick', data: {} },
   );
 }

@@ -1,6 +1,7 @@
 import {
   foreignKey,
   index,
+  integer,
   jsonb,
   pgEnum,
   pgTable,
@@ -57,6 +58,8 @@ export const webhookEvents = pgTable(
     processedAt: timestamp('processed_at', { withTimezone: true }),
     status: webhookEventStatus('status').notNull().default('received'),
     error: text('error'),
+    /** How many times the sweep re-enqueued this FAILED event (live topics stop at 5; privacy topics never stop; other topics are never retried). */
+    sweepRetries: integer('sweep_retries').notNull().default(0),
     ...timestamps,
   },
   (t) => [

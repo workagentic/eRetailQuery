@@ -56,6 +56,7 @@ describe('sweepStaleWebhookEvents', () => {
     const jobs: WebhookJob[] = [];
     const n = await sweepStaleWebhookEvents({
       connections,
+      db,
       enqueuer: { enqueue: async (j) => void jobs.push(j) },
     });
     expect(n).toBe(1);
@@ -67,6 +68,7 @@ describe('sweepStaleWebhookEvents', () => {
     const jobs: WebhookJob[] = [];
     const n = await sweepStaleWebhookEvents({
       connections,
+      db,
       enqueuer: {
         enqueue: async (j) => {
           if (j.eventId === first) throw new Error('redis down');
@@ -83,7 +85,7 @@ describe('sweepStaleWebhookEvents', () => {
     await add('received', 70);
     const jobs: WebhookJob[] = [];
     const n = await sweepStaleWebhookEvents(
-      { connections, enqueuer: { enqueue: async (j) => void jobs.push(j) } },
+      { connections, db, enqueuer: { enqueue: async (j) => void jobs.push(j) } },
       { olderThanMs: 75 * 60_000, limit: 5 },
     );
     expect(n).toBe(2);
@@ -94,6 +96,7 @@ describe('sweepStaleWebhookEvents', () => {
     const real = Date.now();
     await sweepStaleWebhookEvents({
       connections,
+      db,
       now: () => new Date(real),
       enqueuer: { enqueue: async (_j, o) => void buckets.push(o?.retryBucket) },
     });
@@ -127,9 +130,9 @@ describe('sweepStaleWebhookEvents', () => {
     const jobs: WebhookJob[] = [];
     const enqueuer = { enqueue: async (j: WebhookJob) => void jobs.push(j) };
     // Not before the sweep window has passed since the last attempt.
-    expect(await sweepStaleWebhookEvents({ connections, enqueuer })).toBe(0);
+    expect(await sweepStaleWebhookEvents({ connections, db, enqueuer })).toBe(0);
     const later = new Date(Date.now() + 11 * 60_000);
-    expect(await sweepStaleWebhookEvents({ connections, enqueuer, now: () => later })).toBe(1);
+    expect(await sweepStaleWebhookEvents({ connections, db, enqueuer, now: () => later })).toBe(1);
     expect(jobs).toEqual([job]);
     expect(await processWebhookEvent({ db, connections }, jobs[0]!)).toBe('processed');
     // The purge removed the connection, and the event with it (cascade).
@@ -137,7 +140,7 @@ describe('sweepStaleWebhookEvents', () => {
       (await owner.query(`select 1 from store_connections where id = $1`, [ORG])).rowCount,
     ).toBe(0);
   });
-  it('lists failed customers/redact and customers/data_request too, but never other failed topics', async () => {
+  it('lists failed privacy events and failed live-topic events, but never other failed topics', async () => {
     const ins = (topic: string, ext: string) =>
       owner.query(
         `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload, status, updated_at)
@@ -147,14 +150,15 @@ describe('sweepStaleWebhookEvents', () => {
     const cust = (await ins('customers/redact', 'f-1')).rows[0].id as string;
     const data = (await ins('customers/data_request', 'f-2')).rows[0].id as string;
     await ins('orders/updated', 'f-3');
-    await ins('app/uninstalled', 'f-4');
+    const uninst = (await ins('app/uninstalled', 'f-4')).rows[0].id as string;
     const jobs: WebhookJob[] = [];
     const n = await sweepStaleWebhookEvents({
       connections,
+      db,
       enqueuer: { enqueue: async (j) => void jobs.push(j) },
     });
-    expect(n).toBe(2);
-    expect(jobs.map((j) => j.eventId).sort()).toEqual([cust, data].sort());
+    expect(n).toBe(3);
+    expect(jobs.map((j) => j.eventId).sort()).toEqual([cust, data, uninst].sort());
   });
   it('recovers an event stuck in processing: the sweep lists it and a handler run reclaims it', async () => {
     const { rows } = await owner.query(
@@ -166,6 +170,7 @@ describe('sweepStaleWebhookEvents', () => {
     const jobs: WebhookJob[] = [];
     const n = await sweepStaleWebhookEvents({
       connections,
+      db,
       enqueuer: { enqueue: async (j) => void jobs.push(j) },
     });
     expect(n).toBe(1);

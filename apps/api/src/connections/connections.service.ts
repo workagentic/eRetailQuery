@@ -19,6 +19,7 @@ import {
   type ShopifyTokenGrant,
 } from '@erq/connectors';
 import {
+  alerts,
   type ConnectionsApi,
   generateOAuthNonce,
   hashOAuthNonce,
@@ -31,9 +32,11 @@ import {
   syncCursors,
   webhookEvents,
   type TenantDb,
+  type Tx,
 } from '@erq/db';
 import {
   hasRole,
+  type ConnectionAlertDto,
   type ConnectionDto,
   type ConnectionResourceDto,
   type ConnectionSyncDto,
@@ -188,6 +191,7 @@ export class ConnectionsService {
               refreshTokenExpiresAt: expiry.refreshTokenExpiresAt,
             })
             .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, row.id)));
+          await resolveAlerts(tx, orgId, row.id);
           await insertAudit(tx, {
             orgId,
             actorUserId: consumed.userId,
@@ -309,7 +313,7 @@ export class ConnectionsService {
 
   list(orgId: string): Promise<ConnectionDto[]> {
     return this.db.withTenant(orgId, async (tx) => {
-      // Three queries for the whole org, grouped in memory: never one per connection.
+      // A fixed number of queries for the whole org, grouped in memory: never one per connection.
       const rows = await tx
         .select()
         .from(storeConnections)
@@ -349,6 +353,30 @@ export class ConnectionsService {
           ),
         )
         .groupBy(orders.storeConnectionId);
+      const open = await tx
+        .select({
+          id: alerts.id,
+          connectionId: alerts.storeConnectionId,
+          severity: alerts.severity,
+          message: alerts.message,
+        })
+        .from(alerts)
+        .where(
+          and(
+            eq(alerts.orgId, orgId),
+            eq(alerts.type, 'webhook_failed'),
+            isNull(alerts.resolvedAt),
+          ),
+        )
+        .orderBy(alerts.createdAt, alerts.id);
+      const rank = { high: 0, medium: 1, low: 2 } as const;
+      const alertsBy = new Map<string, ConnectionAlertDto[]>();
+      for (const a of open) {
+        if (a.connectionId === null) continue;
+        const list = alertsBy.get(a.connectionId) ?? [];
+        list.push({ id: a.id, severity: a.severity, message: a.message });
+        alertsBy.set(a.connectionId, list);
+      }
       const unlinkedBy = new Map(unlinked.map((u) => [u.connectionId, u.n]));
       const byConn = new Map<string, typeof cursors>();
       for (const c of cursors) {
@@ -370,6 +398,8 @@ export class ConnectionsService {
           coveredBy.get(r.id) ?? null,
           unlinkedBy.get(r.id) ?? 0,
         ),
+        // Array.prototype.sort is stable, so creation order holds within a severity.
+        alerts: (alertsBy.get(r.id) ?? []).sort((x, y) => rank[x.severity] - rank[y.severity]),
       }));
     });
   }
@@ -532,6 +562,7 @@ export class ConnectionsService {
       if (rows.length === 0) {
         throw new ApiError(404, 'connection_not_found', 'Connection not found');
       }
+      await resolveAlerts(tx, orgId, id);
       await insertAudit(tx, {
         orgId,
         actorUserId: userId,
@@ -616,4 +647,18 @@ export class ConnectionsService {
     }
     return 'stored';
   }
+}
+
+/** Resolves a connection's open alerts: a reconnect or a disconnect answers them. */
+async function resolveAlerts(tx: Tx, orgId: string, connectionId: string): Promise<void> {
+  await tx
+    .update(alerts)
+    .set({ resolvedAt: new Date() })
+    .where(
+      and(
+        eq(alerts.orgId, orgId),
+        eq(alerts.storeConnectionId, connectionId),
+        isNull(alerts.resolvedAt),
+      ),
+    );
 }

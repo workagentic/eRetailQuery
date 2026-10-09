@@ -148,7 +148,7 @@ describe('webhook_events', () => {
     ).toEqual(ids.sort());
     expect(await api.listStaleWebhookEvents(new Date(Date.now() - 10 * 60_000), 1)).toHaveLength(1);
   });
-  it('also lists failed privacy events (mandatory erasure) once their last attempt is older than the cutoff', async () => {
+  it('lists failed privacy events and failed live-topic events once their last attempt is older than the cutoff (other topics never)', async () => {
     await owner.query(`delete from webhook_events`);
     await owner.query(
       `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload, status, updated_at) values
@@ -164,12 +164,13 @@ describe('webhook_events', () => {
     const stale = await api.listStaleWebhookEvents(new Date(Date.now() - 10 * 60_000), 10);
     const ids = (
       await owner.query(
-        `select id, external_event_id e from webhook_events where external_event_id in ('p-shop','p-cust','p-data')`,
+        `select id, external_event_id e from webhook_events where external_event_id in ('n-uninst','p-shop','p-cust','p-data')`,
       )
     ).rows;
     const byExt = new Map(ids.map((r) => [r.e as string, r.id as string]));
-    // Oldest last attempt first; a recent failure waits for the next window, other topics never.
+    // Oldest last attempt first; a recent failure waits for the next window; only privacy and live topics are retried.
     expect(stale).toEqual([
+      { orgId: A, eventId: byExt.get('n-uninst') },
       { orgId: A, eventId: byExt.get('p-shop') },
       { orgId: A, eventId: byExt.get('p-cust') },
       { orgId: B, eventId: byExt.get('p-data') },

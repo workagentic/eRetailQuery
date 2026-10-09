@@ -36,6 +36,12 @@ export const fixtures: Record<string, Fixture> = {
        values ($1, $1, 'shopify', 'shop-' || ($1::uuid)::text, 'demo')`,
       [org],
     ),
+  alerts: (q, org) =>
+    q.query(
+      `insert into alerts (org_id, type, severity, store_connection_id, entity_ref, message)
+       values ($1, 'webhook_failed', 'medium', $1, 'webhook_event:fixture', 'Fixture alert')`,
+      [org],
+    ),
   ad_connections: (q, org) =>
     q.query(
       `insert into ad_connections (org_id, platform, external_account_id, status)

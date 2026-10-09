@@ -6,6 +6,7 @@ import {
   type ConnectionSyncDto,
 } from '@erq/shared';
 import {
+  connectionAlerts,
   connectionsErrorMessage,
   describeConnection,
   describeResources,
@@ -41,6 +42,7 @@ const conn = (over: Partial<ConnectionDto> = {}): ConnectionDto => ({
   lastSyncedAt: null,
   lastError: null,
   sync: sync(),
+  alerts: [],
   ...over,
 });
 
@@ -506,5 +508,18 @@ describe('describeUnlinked and REFRESH_NOTE', () => {
     expect(REFRESH_NOTE).toBe(
       'Orders refresh about every 15 minutes. Products and stock levels refresh sooner when Shopify tells us about a change.',
     );
+  });
+});
+
+describe('connectionAlerts', () => {
+  it('lists the open alerts of a connection, highest severity first, keeping order within a severity', () => {
+    const alerts = [
+      { id: 'a', severity: 'medium' as const, message: 'M1' },
+      { id: 'b', severity: 'high' as const, message: 'H1' },
+      { id: 'c', severity: 'medium' as const, message: 'M2' },
+      { id: 'd', severity: 'low' as const, message: 'L1' },
+    ];
+    expect(connectionAlerts({ alerts }).map((a) => a.id)).toEqual(['b', 'a', 'c', 'd']);
+    expect(connectionAlerts({ alerts: [] })).toEqual([]);
   });
 });

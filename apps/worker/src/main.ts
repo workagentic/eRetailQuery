@@ -110,6 +110,7 @@ async function main(): Promise<void> {
           sweepStaleWebhookEvents({
             connections,
             enqueuer,
+            db,
             onError: (message) => log.warn({ err: message }, 'webhook sweep enqueue failed'),
           }),
       },

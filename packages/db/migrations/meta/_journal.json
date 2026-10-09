@@ -176,6 +176,20 @@
       "when": 1791586393543,
       "tag": "0024_schedule_functions",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1791589093132,
+      "tag": "0025_alerts_and_sweep_retries",
+      "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "7",
+      "when": 1791589096183,
+      "tag": "0026_alerts_rls_and_sweep",
+      "breakpoints": true
     }
   ]
 }

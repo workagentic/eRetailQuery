@@ -6,6 +6,7 @@ import { SyncNowButton } from '@/components/sync-now-button';
 import { apiFetch } from '@/lib/api';
 import { loadAppContext } from '@/lib/app-context';
 import {
+  connectionAlerts,
   describeConnection,
   describeResources,
   describeSync,
@@ -104,6 +105,7 @@ export default async function ConnectionsPage({
                 const lines = describeResources(c.sync, now);
                 const unlinked = describeUnlinked(c.sync.unlinkedLines);
                 const syncId = `sync-${c.id}`;
+                const openAlerts = connectionAlerts(c);
                 return (
                   <li
                     key={c.id}
@@ -111,6 +113,15 @@ export default async function ConnectionsPage({
                   >
                     <div className="min-w-0">
                       <p className="break-all font-medium">{c.shop}</p>
+                      {openAlerts.map((a) => (
+                        <p
+                          key={a.id}
+                          role="alert"
+                          className="mt-1 rounded-md border border-destructive p-2 text-sm text-destructive"
+                        >
+                          {a.message}
+                        </p>
+                      ))}
                       <p className="text-sm text-muted-foreground">{v.detail}</p>
                       <div id={syncId} className="mt-1 text-sm">
                         <p
@@ -150,9 +161,11 @@ export default async function ConnectionsPage({
                       <span className={`rounded-full px-2 py-0.5 text-xs ${TONE_CLASS[v.tone]}`}>
                         {v.label}
                       </span>
-                      {isAdmin && c.platform === 'shopify' && v.canReconnect && (
-                        <ReconnectShopify shop={c.shop} />
-                      )}
+                      {isAdmin &&
+                        c.platform === 'shopify' &&
+                        (v.canReconnect || openAlerts.length > 0) && (
+                          <ReconnectShopify shop={c.shop} />
+                        )}
                       {isAdmin && c.platform === 'shopify' && c.status !== 'disconnected' && (
                         <SyncNowButton
                           id={c.id}

@@ -10,6 +10,7 @@ import {
 } from '@erq/db';
 import type { WebhookJob } from '@erq/shared';
 import type { JobQueue } from '@erq/sync';
+import { raiseWebhookAlertIfExhausted } from './alerts';
 import { nudgeResourceFor, nudgeSync } from './nudge';
 
 export type WebhookOutcome = 'processed' | 'deferred' | 'ignored' | 'skipped';
@@ -211,9 +212,10 @@ export async function processWebhookEvent(
   } catch (error) {
     try {
       const message = sanitizeMessage(error);
-      await deps.db.withTenant(orgId, (tx) =>
-        setStatus(tx, orgId, eventId, 'failed', now(), message),
-      );
+      await deps.db.withTenant(orgId, async (tx) => {
+        await setStatus(tx, orgId, eventId, 'failed', now(), message);
+        await raiseWebhookAlertIfExhausted(tx, { orgId, eventId, topic, storeConnectionId });
+      });
     } catch {
       /* best effort: the original error must not be masked */
     }

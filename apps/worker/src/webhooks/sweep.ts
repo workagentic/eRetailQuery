@@ -1,10 +1,14 @@
 import { sanitizeMessage } from '@erq/connectors';
-import type { ConnectionsApi } from '@erq/db';
+import { webhookEvents, type ConnectionsApi, type TenantDb } from '@erq/db';
+import { and, eq, notInArray, sql } from 'drizzle-orm';
+import { MANDATORY_PRIVACY_TOPICS } from './alerts';
 import { STALE_EVENT_MS } from './handler';
 import type { WebhookEnqueuer } from './worker';
 
 export interface SweepDeps {
   connections: ConnectionsApi;
+  /** Counts the sweep retries of failed live-topic events. */
+  db: TenantDb;
   enqueuer: WebhookEnqueuer;
   now?: () => Date;
   /** Receives a sanitized message per failed enqueue. */
@@ -13,7 +17,8 @@ export interface SweepDeps {
 
 /**
  * Re-enqueues events still `received` (the API's enqueue was lost) or stuck in `processing` (a worker crashed)
- * after the cutoff. Each sweep window uses its own job id, so a retained finished job never swallows the retry;
+ * after the cutoff, failed privacy events (without limit) and failed live-topic events (`app/uninstalled`,
+ * `products/update`, `inventory_levels/update`) while they have sweep retries left; each such retry is counted. Each sweep window uses its own job id, so a retained finished job never swallows the retry;
  * duplicate processing is safe because the handler claims the event atomically. Returns how many were enqueued.
  */
 export async function sweepStaleWebhookEvents(
@@ -28,6 +33,21 @@ export async function sweepStaleWebhookEvents(
   let enqueued = 0;
   for (const job of stale) {
     try {
+      // Every re-enqueue of a failed live-topic event spends one of its retries (the update also restarts the
+      // 10 minute cool-down through the updated_at trigger). Received, processing and privacy events are untouched.
+      await deps.db.withTenant(job.orgId, (tx) =>
+        tx
+          .update(webhookEvents)
+          .set({ sweepRetries: sql`${webhookEvents.sweepRetries} + 1` })
+          .where(
+            and(
+              eq(webhookEvents.orgId, job.orgId),
+              eq(webhookEvents.id, job.eventId),
+              eq(webhookEvents.status, 'failed'),
+              notInArray(webhookEvents.topic, [...MANDATORY_PRIVACY_TOPICS]),
+            ),
+          ),
+      );
       await deps.enqueuer.enqueue({ orgId: job.orgId, eventId: job.eventId }, { retryBucket });
       enqueued++;
     } catch (error) {

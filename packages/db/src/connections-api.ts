@@ -19,7 +19,9 @@ export interface ConnectionsApi {
   /**
    * Events still `received` past the cutoff (never queued), stuck in `processing` past it (worker
    * crashed), or privacy events (customers/data_request, customers/redact, shop/redact) left `failed`
-   * after their queue attempts with the last attempt past it (migration 0021), oldest first.
+   * after their queue attempts with the last attempt past it (migration 0021), or failed events of the
+   * live topics (app/uninstalled, products/update, inventory_levels/update) that still have sweep
+   * retries left (migration 0026), oldest first.
    */
   listStaleWebhookEvents(
     olderThan: Date,

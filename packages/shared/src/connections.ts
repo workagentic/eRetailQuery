@@ -44,6 +44,15 @@ export interface ConnectionDto {
   lastSyncedAt: string | null;
   lastError: string | null;
   sync: ConnectionSyncDto;
+  /** Open `webhook_failed` alerts of this connection, highest severity first. */
+  alerts: ConnectionAlertDto[];
+}
+
+export interface ConnectionAlertDto {
+  id: string;
+  severity: 'low' | 'medium' | 'high';
+  /** A fixed, plain-English text that says what to do. Never raw error text. */
+  message: string;
 }
 
 export interface InstallResponse {

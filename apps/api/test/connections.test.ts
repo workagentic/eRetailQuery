@@ -196,6 +196,7 @@ describe('GET /orgs/:orgId/connections and disconnect', () => {
           ],
           unlinkedLines: 0,
         },
+        alerts: [],
       },
     ]);
     expect(JSON.stringify(list.body)).not.toMatch(/ciphertext|credential|token/i);
@@ -722,6 +723,35 @@ describe('POST /connections/shopify/callback', () => {
       [orgId],
     );
     expect(rows).toEqual([{ id: first.rows[0].id, status: 'active', last_error: null }]);
+  });
+
+  it('a reconnect resolves the open webhook alerts of that connection and leaves other connections alone', async () => {
+    const { orgId, h } = await createOrg('Reconnect Alerts Org');
+    let state = await startInstall(orgId, h);
+    await callbackAs(authOnly(h), rawSigned(state));
+    const { rows } = await owner.query(`select id from store_connections where org_id = $1`, [
+      orgId,
+    ]);
+    const id = rows[0].id as string;
+    const sibling = await owner.query(
+      `insert into store_connections (org_id, platform, external_account_id, status) values ($1, 'shopify', 'sibling.myshopify.com', 'active') returning id`,
+      [orgId],
+    );
+    for (const target of [id, sibling.rows[0].id as string]) {
+      await owner.query(
+        `insert into alerts (org_id, type, severity, store_connection_id, entity_ref, message) values ($1, 'webhook_failed', 'high', $2, $3, 'x')`,
+        [orgId, target, `webhook_event:${target}`],
+      );
+    }
+    await owner.query(`update store_connections set status = 'disconnected' where id = $1`, [id]);
+    state = await startInstall(orgId, h);
+    await callbackAs(authOnly(h), rawSigned(state));
+    const after = await owner.query(`select store_connection_id, resolved_at from alerts`);
+    const byConn = Object.fromEntries(
+      after.rows.map((r) => [r.store_connection_id, r.resolved_at]),
+    );
+    expect(byConn[id]).not.toBeNull();
+    expect(byConn[sibling.rows[0].id]).toBeNull();
   });
 
   it('refuses a shop that is actively connected to a different org', async () => {
@@ -1478,5 +1508,59 @@ describe('per-resource sync status', () => {
     expect(res.status).toBe(200);
     expect(res.body[0].sync.resources).toHaveLength(4);
     expect(JSON.stringify(res.body)).not.toMatch(/ciphertext|credential|token/i);
+  });
+});
+
+describe('webhook failure alerts', () => {
+  async function alertFor(
+    orgId: string,
+    connectionId: string,
+    severity: 'low' | 'medium' | 'high',
+    ref: string,
+    message: string,
+  ) {
+    const { rows } = await owner.query(
+      `insert into alerts (org_id, type, severity, store_connection_id, entity_ref, message) values ($1, 'webhook_failed', $2, $3, $4, $5) returning id`,
+      [orgId, severity, connectionId, ref, message],
+    );
+    return rows[0].id as string;
+  }
+  async function conn(orgId: string, shop: string) {
+    const { rows } = await owner.query(
+      `insert into store_connections (org_id, platform, external_account_id, status, encrypted_credentials) values ($1, 'shopify', $2, 'active', 'ciphertext') returning id`,
+      [orgId, shop],
+    );
+    return rows[0].id as string;
+  }
+  it('lists only the open alerts of this org, highest severity first, with no internal fields', async () => {
+    const { orgId, h } = await createOrg('Alerts Org');
+    const id = await conn(orgId, 'alerts1.myshopify.com');
+    const medium = await alertFor(orgId, id, 'medium', 'webhook_event:1', 'Medium text.');
+    const high = await alertFor(orgId, id, 'high', 'webhook_event:2', 'High text.');
+    const resolved = await alertFor(orgId, id, 'high', 'webhook_event:3', 'Resolved text.');
+    await owner.query(`update alerts set resolved_at = now() where id = $1`, [resolved]);
+    const other = await createOrg('Other Alerts Org');
+    const otherConn = await conn(other.orgId, 'alerts2.myshopify.com');
+    await alertFor(other.orgId, otherConn, 'high', 'webhook_event:9', 'Other org text.');
+    const body = (await request(server()).get(`/orgs/${orgId}/connections`).set(h)).body;
+    expect(body[0].alerts).toEqual([
+      { id: high, severity: 'high', message: 'High text.' },
+      { id: medium, severity: 'medium', message: 'Medium text.' },
+    ]);
+    expect(JSON.stringify(body)).not.toMatch(/Other org text|Resolved text|webhook_event/);
+    const viewer = await addMember(orgId, 'viewer');
+    expect(
+      (await request(server()).get(`/orgs/${orgId}/connections`).set(viewer)).body[0].alerts,
+    ).toHaveLength(2);
+  });
+  it('a disconnect resolves the connection alerts', async () => {
+    const { orgId, h } = await createOrg('Disconnect Alerts Org');
+    const id = await conn(orgId, 'alerts3.myshopify.com');
+    await alertFor(orgId, id, 'high', 'webhook_event:1', 'Text.');
+    await request(server()).post(`/orgs/${orgId}/connections/${id}/disconnect`).set(h);
+    expect(
+      (await owner.query(`select resolved_at from alerts where store_connection_id = $1`, [id]))
+        .rows[0].resolved_at,
+    ).not.toBeNull();
   });
 });

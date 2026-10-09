@@ -1,4 +1,9 @@
-import type { ConnectionDto, ConnectionResourceDto, ConnectionSyncDto } from '@erq/shared';
+import type {
+  ConnectionAlertDto,
+  ConnectionDto,
+  ConnectionResourceDto,
+  ConnectionSyncDto,
+} from '@erq/shared';
 
 const GENERIC_ERROR = 'Something went wrong connecting to Shopify. Please try again.';
 
@@ -338,4 +343,10 @@ export function isShopifyAuthorizeUrl(raw: unknown): raw is string {
   } catch {
     return false;
   }
+}
+
+const SEVERITY_RANK = { high: 0, medium: 1, low: 2 } as const;
+/** Open alerts of a connection, highest severity first (the order within a severity is kept). */
+export function connectionAlerts(c: Pick<ConnectionDto, 'alerts'>): ConnectionAlertDto[] {
+  return [...c.alerts].sort((a, b) => SEVERITY_RANK[a.severity] - SEVERITY_RANK[b.severity]);
 }

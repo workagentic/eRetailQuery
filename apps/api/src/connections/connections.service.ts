@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, count, eq, isNotNull, isNull, lt, min, sql } from 'drizzle-orm';
+import { and, count, eq, inArray, isNotNull, isNull, lt, min, sql } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import {
   buildAuthorizeUrl,
@@ -192,6 +192,7 @@ export class ConnectionsService {
             })
             .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, row.id)));
           await resolveAlerts(tx, orgId, row.id);
+          await retirePendingUninstalls(tx, orgId, row.id);
           await insertAudit(tx, {
             orgId,
             actorUserId: consumed.userId,
@@ -659,6 +660,25 @@ async function resolveAlerts(tx: Tx, orgId: string, connectionId: string): Promi
         eq(alerts.orgId, orgId),
         eq(alerts.storeConnectionId, connectionId),
         isNull(alerts.resolvedAt),
+      ),
+    );
+}
+
+/**
+ * A reconnect makes any pending `app/uninstalled` event of the connection stale: retried later, it would
+ * disconnect the reinstalled shop and wipe its new tokens. The worker locks the event row and stops unless it is
+ * still `processing`, so this update and an in-flight uninstall serialize.
+ */
+async function retirePendingUninstalls(tx: Tx, orgId: string, connectionId: string): Promise<void> {
+  await tx
+    .update(webhookEvents)
+    .set({ status: 'ignored', updatedAt: new Date() })
+    .where(
+      and(
+        eq(webhookEvents.orgId, orgId),
+        eq(webhookEvents.storeConnectionId, connectionId),
+        eq(webhookEvents.topic, 'app/uninstalled'),
+        inArray(webhookEvents.status, ['received', 'failed', 'processing']),
       ),
     );
 }

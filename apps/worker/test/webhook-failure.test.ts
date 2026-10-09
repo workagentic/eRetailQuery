@@ -195,3 +195,56 @@ describe('the alert at exhaustion', () => {
     expect(await alertRows()).toEqual([]);
   });
 });
+
+describe('a stale uninstall after a reconnect', () => {
+  const connection = async () =>
+    (
+      await owner.query(
+        `select status, encrypted_credentials from store_connections where id = $1`,
+        [ORG],
+      )
+    ).rows[0];
+  it('leaves a reinstalled shop connected when the reconnect retired the failed uninstall (sweep plus handler run)', async () => {
+    const id = await addEvent('app/uninstalled', { status: 'failed', minutesOld: 30 });
+    // What the API's reconnect transaction does (apps/api connections.service retirePendingUninstalls).
+    await owner.query(`update webhook_events set status = 'ignored' where id = $1`, [id]);
+    const enqueued: string[] = [];
+    const swept = await sweepStaleWebhookEvents({
+      connections,
+      db,
+      enqueuer: { enqueue: async (j) => void enqueued.push(j.eventId) },
+      now: () => new Date(),
+    });
+    expect(swept).toBe(0);
+    expect(await run(id)).toBe('skipped');
+    expect(await connection()).toEqual({ status: 'active', encrypted_credentials: 'ciphertext' });
+  });
+  it('stops an in-flight uninstall whose event was retired by a reconnect after the claim', async () => {
+    const id = await addEvent('app/uninstalled', { status: 'failed', minutesOld: 30 });
+    let calls = 0;
+    const reconnectAfterClaim = {
+      ...db,
+      withTenant: async (org: string, fn: Parameters<TenantDb['withTenant']>[1]) => {
+        // Between the claim (call 1) and the work (call 2) the reconnect commits.
+        if (++calls === 2)
+          await owner.query(`update webhook_events set status = 'ignored' where id = $1`, [id]);
+        return db.withTenant(org, fn);
+      },
+    } as TenantDb;
+    expect(await run(id, { db: reconnectAfterClaim })).toBe('skipped');
+    expect(await connection()).toEqual({ status: 'active', encrypted_credentials: 'ciphertext' });
+    expect((await event(id)).status).toBe('ignored');
+  });
+});
+
+describe('a later success', () => {
+  it('resolves the alert an exhausted earlier failure raised', async () => {
+    const id = await addEvent('app/uninstalled', { retries: 5 });
+    await expect(run(id, { db: failingWork() })).rejects.toThrow('db down');
+    expect((await alertRows()).map((r) => r.resolved_at)).toEqual([null]);
+    expect(await run(id)).toBe('processed');
+    const rows = await alertRows();
+    expect(rows).toHaveLength(1);
+    expect(rows[0].resolved_at).not.toBeNull();
+  });
+});

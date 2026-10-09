@@ -725,6 +725,43 @@ describe('POST /connections/shopify/callback', () => {
     expect(rows).toEqual([{ id: first.rows[0].id, status: 'active', last_error: null }]);
   });
 
+  it('a reconnect retires pending app/uninstalled events so a sweep retry cannot disconnect the reinstalled shop', async () => {
+    const { orgId, h } = await createOrg('Reconnect Uninstall Org');
+    await callbackAs(authOnly(h), rawSigned(await startInstall(orgId, h)));
+    const { rows } = await owner.query(`select id from store_connections where org_id = $1`, [
+      orgId,
+    ]);
+    const id = rows[0].id as string;
+    const ev = await owner.query(
+      `insert into webhook_events (org_id, store_connection_id, topic, external_event_id, payload, status, updated_at) values
+        ($1, $2, 'app/uninstalled', 'u-failed', '{}', 'failed', now() - interval '30 minutes'),
+        ($1, $2, 'products/update', 'p-failed', '{}', 'failed', now() - interval '30 minutes')
+       returning external_event_id e, id`,
+      [orgId, id],
+    );
+    await owner.query(`update store_connections set status = 'disconnected' where id = $1`, [id]);
+    await callbackAs(authOnly(h), rawSigned(await startInstall(orgId, h)));
+    const events = await owner.query(
+      `select external_event_id e, status from webhook_events where store_connection_id = $1 order by 1`,
+      [id],
+    );
+    expect(events.rows).toEqual([
+      { e: 'p-failed', status: 'failed' },
+      { e: 'u-failed', status: 'ignored' },
+    ]);
+    const stale = await owner.query(
+      `select o_event_id from app_list_stale_webhook_events(now() + interval '1 day', 100)`,
+    );
+    const uninst = ev.rows.find((r) => r.e === 'u-failed').id as string;
+    expect(stale.rows.map((r) => r.o_event_id)).not.toContain(uninst);
+    const conn = await owner.query(
+      `select status, encrypted_credentials from store_connections where id = $1`,
+      [id],
+    );
+    expect(conn.rows[0].status).toBe('active');
+    expect(conn.rows[0].encrypted_credentials).not.toBeNull();
+  });
+
   it('a reconnect resolves the open webhook alerts of that connection and leaves other connections alone', async () => {
     const { orgId, h } = await createOrg('Reconnect Alerts Org');
     let state = await startInstall(orgId, h);

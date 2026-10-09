@@ -1,6 +1,7 @@
-import { and, eq, or, sql } from 'drizzle-orm';
+import { and, eq, isNull, or, sql } from 'drizzle-orm';
 import { sanitizeMessage } from '@erq/connectors';
 import {
+  alerts,
   insertAudit,
   storeConnections,
   webhookEvents,
@@ -62,6 +63,19 @@ async function setStatus(
       ...(status === 'deferred' || scrub ? { payload: {} } : {}),
     })
     .where(and(eq(webhookEvents.orgId, orgId), eq(webhookEvents.id, id)));
+  if (status === 'processed') {
+    // A later successful run answers the alert an exhausted earlier failure raised.
+    await tx
+      .update(alerts)
+      .set({ resolvedAt: now })
+      .where(
+        and(
+          eq(alerts.orgId, orgId),
+          eq(alerts.entityRef, `webhook_event:${id}`),
+          isNull(alerts.resolvedAt),
+        ),
+      );
+  }
 }
 
 /**
@@ -171,6 +185,15 @@ export async function processWebhookEvent(
     return await deps.db.withTenant(orgId, async (tx) => {
       const at = now();
       if (topic === 'app/uninstalled') {
+        // A reconnect retires pending uninstall events in its own transaction. Locking the event row serializes
+        // against it: if the event is no longer ours (`processing`), the shop was reinstalled since, so a stale
+        // uninstall must not disconnect it and wipe the new tokens.
+        const [current] = await tx
+          .select({ status: webhookEvents.status })
+          .from(webhookEvents)
+          .where(and(eq(webhookEvents.orgId, orgId), eq(webhookEvents.id, eventId)))
+          .for('update');
+        if (current?.status !== 'processing') return 'skipped' as const;
         const updated = await tx
           .update(storeConnections)
           .set({ status: 'disconnected', encryptedCredentials: null })

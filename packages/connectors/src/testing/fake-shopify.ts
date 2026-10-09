@@ -26,14 +26,23 @@ export class FakeShopify implements HttpClient {
   private refreshGeneration = 0;
   private readonly scope: string;
   private readonly codes: Set<string>;
+  /** Topics Shopify refuses (a userError that is not "already taken"); they are never stored. */
+  private readonly rejectTopics: Set<string>;
 
   constructor(
-    opts: { token?: string; refreshToken?: string; scope?: string; codes?: Set<string> } = {},
+    opts: {
+      token?: string;
+      refreshToken?: string;
+      scope?: string;
+      codes?: Set<string>;
+      rejectTopics?: Set<string>;
+    } = {},
   ) {
     this.token = opts.token ?? 'shpat_fake_token';
     this.refreshToken = opts.refreshToken ?? 'shprt_fake_refresh';
     this.scope = opts.scope ?? 'read_orders,read_products';
     this.codes = opts.codes ?? new Set(['good-code']);
+    this.rejectTopics = opts.rejectTopics ?? new Set();
   }
 
   /** Forgets scripted responses, recorded requests and subscriptions (use in beforeEach). */
@@ -111,6 +120,19 @@ export class FakeShopify implements HttpClient {
         variables: { topic: string; url: string };
       };
       const topic = ENUM_TO_TOPIC.get(variables.topic) ?? variables.topic;
+      if (this.rejectTopics.has(topic)) {
+        return {
+          status: 200,
+          headers: {},
+          body: JSON.stringify({
+            data: {
+              webhookSubscriptionCreate: {
+                userErrors: [{ field: ['topic'], message: 'This topic requires approval' }],
+              },
+            },
+          }),
+        };
+      }
       const exists = this.subscriptions.has(topic);
       if (!exists) this.subscriptions.set(topic, variables.url);
       const userErrors = exists

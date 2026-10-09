@@ -12,6 +12,9 @@ export const safeMessage = (error: unknown): string => sanitizeMessage(error, 50
  */
 export const IMPORT_NOT_STARTED_MESSAGE = 'Could not start the first import. Use Sync now.';
 
+/** Stored on a connection whose webhook subscriptions were rejected (connect and the daily re-register); polling still covers it. */
+export const WEBHOOK_SETUP_FAILED_MESSAGE = 'Webhook setup failed. Reconnect to retry.';
+
 /** Flags a connection as errored. Only active, pending and error connections change: a disconnected or demo connection must never become `error` (it would escape the active-shop unique index). */
 export async function markConnectionError(
   tx: Tx,

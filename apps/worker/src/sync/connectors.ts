@@ -6,7 +6,7 @@ import type { HttpClient } from '@erq/connectors';
  * An invalid value stops the worker at startup instead of failing every sync; the message never
  * echoes the value (a mis-pasted secret must not reach the logs).
  */
-function shopifyApiVersion(env: NodeJS.ProcessEnv): string | undefined {
+export function shopifyApiVersion(env: NodeJS.ProcessEnv): string | undefined {
   const raw = (env.SHOPIFY_API_VERSION ?? '').trim();
   if (raw === '') return undefined;
   if (!/^\d{4}-\d{2}$/.test(raw)) {

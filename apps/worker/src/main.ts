@@ -2,17 +2,18 @@ import path from 'node:path';
 import { Queue } from 'bullmq';
 import dotenv from 'dotenv';
 import IORedis from 'ioredis';
-import { sanitizeMessage } from '@erq/connectors';
+import { createFetchHttpClient, sanitizeMessage, SHOPIFY_API_VERSION } from '@erq/connectors';
 import { createConnectionsApi, createTenantDb, type TenantDb } from '@erq/db';
 import { createLogger, EnvKeyProvider, WEBHOOK_QUEUE } from '@erq/shared';
 import type { SchedulerDeps } from '@erq/sync';
 import { BullMqJobQueue, SYNC_QUEUE } from './sync/bullmq-queue';
-import { createWorkerConnectors } from './sync/connectors';
+import { createWorkerConnectors, shopifyApiVersion } from './sync/connectors';
 import { RedisRateLimiter } from './sync/redis-rate-limiter';
 import { createWorkerTokenService, workerRefreshFn } from './sync/tokens';
 import { createSyncWorker, scheduleResumeStalled, scheduleSyncTick } from './sync/worker';
 import { createSystemWorker, SYSTEM_QUEUE } from './system-worker';
 import { processWebhookEvent } from './webhooks/handler';
+import { createWebhookReconciler } from './webhooks/reconcile';
 import { sweepStaleWebhookEvents } from './webhooks/sweep';
 import {
   BullMqWebhookEnqueuer,
@@ -52,18 +53,40 @@ async function main(): Promise<void> {
         'SHOPIFY_API_KEY or SHOPIFY_API_SECRET is missing: expiring Shopify tokens cannot be refreshed',
       );
     }
+    const tokens = createWorkerTokenService(process.env, db, keyProvider);
+    // The daily re-register needs the public webhook URL; without it nothing is re-registered.
+    const callbackUrl = process.env.API_PUBLIC_URL
+      ? `${process.env.API_PUBLIC_URL.replace(/\/+$/, '')}/webhooks/shopify`
+      : undefined;
+    if (!callbackUrl)
+      log.warn('API_PUBLIC_URL is missing: webhook subscriptions are not re-registered');
     const deps: SchedulerDeps = {
       db,
       connectors: createWorkerConnectors(process.env),
       limiter: new RedisRateLimiter(connection),
       queue: new BullMqJobQueue(syncQueue),
       keyProvider,
-      tokens: createWorkerTokenService(process.env, db, keyProvider),
+      tokens,
       // Messages are sanitized by the tick (no tokens); they name the connection only.
       onError: (message) => log.warn({ err: message }, 'sync tick problem'),
+      reconcileWebhooks: callbackUrl
+        ? createWebhookReconciler({
+            db,
+            tokens,
+            http: createFetchHttpClient(),
+            callbackUrl,
+            apiVersion: shopifyApiVersion(process.env) ?? SHOPIFY_API_VERSION,
+          })
+        : undefined,
     };
     syncWorker = createSyncWorker(deps, connection, {
       concurrency: Number(process.env.SYNC_CONCURRENCY ?? 5),
+    });
+    // Page failures are recorded on the run; a failed tick only needs a log line (sanitized, no payload).
+    syncWorker.on('failed', (job, err) => {
+      if (job?.name === 'schedule-tick') {
+        log.error({ job: job.name, err: sanitizeMessage(err) }, 'sync tick failed');
+      }
     });
     await scheduleResumeStalled(syncQueue);
     await scheduleSyncTick(syncQueue);
@@ -78,9 +101,11 @@ async function main(): Promise<void> {
     const connections = createConnectionsApi(db.pool);
     webhookQueue = new Queue(WEBHOOK_QUEUE, { connection });
     const enqueuer = new BullMqWebhookEnqueuer(webhookQueue);
+    // Nudges need the sync queue; without it (no ENCRYPTION_KEY) a nudge topic ends `ignored`.
+    const sync = syncQueue ? { queue: new BullMqJobQueue(syncQueue) } : undefined;
     webhookWorker = createWebhookWorker(
       {
-        handle: (job) => processWebhookEvent({ db, connections }, job),
+        handle: (job) => processWebhookEvent({ db, connections, sync }, job),
         sweep: () =>
           sweepStaleWebhookEvents({
             connections,

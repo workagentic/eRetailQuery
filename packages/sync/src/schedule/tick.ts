@@ -9,6 +9,8 @@ import { dueResources, planChains, type CursorSnapshot } from './due';
 export interface SchedulerDeps extends SyncDeps {
   /** Receives a sanitized message for every failure the tick survived (the worker logs it). */
   onError?: (message: string) => void;
+  /** Re-registers the webhook subscriptions of one connection (idempotent). Called once per connection per daily products pass. */
+  reconcileWebhooks?: (args: { orgId: string; connectionId: string }) => Promise<void>;
 }
 export interface TickSummary {
   connections: number;
@@ -69,6 +71,15 @@ export async function runSchedulerTick(deps: SchedulerDeps): Promise<TickSummary
     if (due.length === 0) continue;
     summary.connections += 1;
     const plan = planChains(due);
+    if (plan.full.length > 0 && deps.reconcileWebhooks) {
+      // Nothing records which topics a connection registered; registering is idempotent, so doing it on the
+      // daily pass heals shops connected before a topic existed, at most once a day per connection.
+      try {
+        await deps.reconcileWebhooks({ orgId: group.orgId, connectionId: group.connectionId });
+      } catch (err) {
+        report(group.connectionId, err);
+      }
+    }
     for (const [resources, mode] of [
       [plan.incremental, 'incremental'],
       [plan.full, 'full'],

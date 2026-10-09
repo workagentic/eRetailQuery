@@ -107,9 +107,7 @@ describe('processWebhookEvent', () => {
       'orders/cancelled',
       'refunds/create',
       'products/create',
-      'products/update',
       'products/delete',
-      'inventory_levels/update',
     ]) {
       const id = await addEvent(topic);
       expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: id }), topic).toBe(
@@ -322,8 +320,8 @@ describe('processWebhookEvent', () => {
     expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: id })).toBe('processed');
   });
   it('reclaims an event stuck in processing for over 10 minutes but not a fresh one', async () => {
-    const stale = await addEvent('products/update', { status: 'processing', ageMinutes: 30 });
-    const fresh = await addEvent('products/update', { status: 'processing', ageMinutes: 1 });
+    const stale = await addEvent('orders/updated', { status: 'processing', ageMinutes: 30 });
+    const fresh = await addEvent('orders/updated', { status: 'processing', ageMinutes: 1 });
     expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: stale })).toBe('deferred');
     expect(await processWebhookEvent(deps(), { orgId: ORG, eventId: fresh })).toBe('skipped');
   });

@@ -5,23 +5,30 @@ import { isValidShopDomain } from './domain';
 import type { HttpClient } from './http';
 
 /**
- * Topics registered at install in 1b-2. Only the uninstall: data topics carry customer data, need Shopify's
- * protected customer data approval and would only be parked unread until 1b-3 consumes them.
+ * Topics subscribed on connect and by the scheduler's daily re-register. Only topics whose payload carries no
+ * customer data: a product edit and a stock change only NUDGE a sync (the worker never reads their payload).
+ * Order, refund and customer topics need Shopify's protected customer data approval and are not subscribed, so
+ * orders are polled every 15 minutes instead.
  */
-export const SHOPIFY_WEBHOOK_TOPICS = ['app/uninstalled'] as const;
+export const SHOPIFY_WEBHOOK_TOPICS = [
+  'app/uninstalled',
+  'products/update',
+  'inventory_levels/update',
+] as const;
 
-/** Order, refund, product and stock topics, subscribed in 1b-3 together with their consumption. */
+/** Order, refund and other product topics: NOT subscribed (see above). */
 export const SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS = [
   'orders/create',
   'orders/updated',
   'orders/cancelled',
   'refunds/create',
   'products/create',
-  'products/update',
   'products/delete',
-  'inventory_levels/update',
 ] as const;
 
+// Query cost note: one mutation with one input object and a two-field userErrors list, no connection and no
+// pagination, so its requested cost is about 10 points, far under Shopify's 1000-point cap. Sent once per topic
+// (three per call).
 const MUTATION = `mutation Subscribe($topic: WebhookSubscriptionTopic!, $url: URL!) {
   webhookSubscriptionCreate(topic: $topic, webhookSubscription: { callbackUrl: $url, format: JSON }) {
     userErrors { field message }

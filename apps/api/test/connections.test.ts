@@ -416,7 +416,12 @@ describe('POST /connections/shopify/callback', () => {
       ).toThrow(); // bound to this connection
       // 1b-2 subscribes to the uninstall only: no customer-data topics before 1b-3.
       expect(fake.subscriptions.get('app/uninstalled')).toBe('http://api.test/webhooks/shopify');
-      expect([...fake.subscriptions.keys()]).toEqual(['app/uninstalled']);
+      // Only non-customer topics; order, refund and customer topics wait for protected customer data approval.
+      expect([...fake.subscriptions.keys()]).toEqual([
+        'app/uninstalled',
+        'products/update',
+        'inventory_levels/update',
+      ]);
       expect(
         (
           await owner.query(

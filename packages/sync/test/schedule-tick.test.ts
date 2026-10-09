@@ -242,6 +242,28 @@ describe('runSchedulerTick', () => {
     expect(h.queue.size).toBe(0);
     expect(await runs()).toEqual([]);
   });
+  it('re-registers webhooks only on the tick that starts the daily products pass, and a failure there does not stop the sync', async () => {
+    const h = makeHarness(env);
+    const calls: { orgId: string; connectionId: string }[] = [];
+    await seed(CONN_A, ORG_A, { agoMin: 20, fullPassAgoMin: 60 }); // incremental only
+    await runSchedulerTick({ ...h.deps, reconcileWebhooks: async (a) => void calls.push(a) });
+    expect(calls).toEqual([]);
+
+    await resetSync(env);
+    await seed(CONN_A, ORG_A, { agoMin: 20, fullPassAgoMin: null }); // the daily pass is due
+    const messages: string[] = [];
+    const summary = await runSchedulerTick({
+      ...h.deps,
+      reconcileWebhooks: async (a) => {
+        calls.push(a);
+        throw new Error('shopify down shpat_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKE');
+      },
+      onError: (m) => messages.push(m),
+    });
+    expect(calls).toEqual([{ orgId: ORG_A, connectionId: CONN_A }]);
+    expect(summary).toMatchObject({ failed: 1, enqueued: 2 }); // the sync chains still started
+    expect(messages[0]).not.toContain('shpat_');
+  });
 });
 
 describe('idle refresh', () => {

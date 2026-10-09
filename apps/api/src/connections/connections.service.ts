@@ -40,7 +40,7 @@ import {
   type ShopifyErrorCode,
   type SyncNowResponse,
 } from '@erq/shared';
-import { IMPORT_NOT_STARTED_MESSAGE } from '@erq/sync';
+import { IMPORT_NOT_STARTED_MESSAGE, WEBHOOK_SETUP_FAILED_MESSAGE } from '@erq/sync';
 import { ApiError } from '../common/api-error';
 import { APP_CONFIG, LOGGER } from '../config/config.module';
 import type { Env } from '../config/env';
@@ -241,9 +241,7 @@ export class ConnectionsService {
       if (webhooksOk && !importFailed) return this.redirect({ shopify: 'connected' });
       // One warning fits: a webhook failure wins because a reconnect fixes both (it also restarts
       // the import). The import text is the shared constant the sync engine clears at a chain end.
-      const lastError = !webhooksOk
-        ? 'Webhook setup failed. Reconnect to retry.'
-        : IMPORT_NOT_STARTED_MESSAGE;
+      const lastError = !webhooksOk ? WEBHOOK_SETUP_FAILED_MESSAGE : IMPORT_NOT_STARTED_MESSAGE;
       try {
         await this.db.withTenant(orgId, (tx) =>
           tx

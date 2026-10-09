@@ -9,6 +9,8 @@ import {
   type Tx,
 } from '@erq/db';
 import type { WebhookJob } from '@erq/shared';
+import type { JobQueue } from '@erq/sync';
+import { nudgeResourceFor, nudgeSync } from './nudge';
 
 export type WebhookOutcome = 'processed' | 'deferred' | 'ignored' | 'skipped';
 
@@ -16,11 +18,14 @@ export interface WebhookHandlerDeps {
   db: TenantDb;
   connections: ConnectionsApi;
   now?: () => Date;
+  /** The sync queue for nudges. Without it a nudge topic (`products/update`, `inventory_levels/update`) ends `ignored`. */
+  sync?: { queue: JobQueue };
 }
 
 /**
- * Order, product and stock topics are applied by the sync pipeline in 1b-3. 1b-2 does not subscribe to them; if
- * one arrives anyway it is parked as `deferred` with its payload (customer data) replaced by `{}`.
+ * Order, refund and other product topics are not subscribed (order and refund payloads carry customer data); if
+ * one arrives anyway it is parked as `deferred` with its payload replaced by `{}`. `products/update` and
+ * `inventory_levels/update` are subscribed and only nudge a sync (see ./nudge).
  */
 const DATA_TOPICS = new Set([
   'orders/create',
@@ -28,9 +33,7 @@ const DATA_TOPICS = new Set([
   'orders/cancelled',
   'refunds/create',
   'products/create',
-  'products/update',
   'products/delete',
-  'inventory_levels/update',
 ]);
 const PRIVACY_TOPICS = new Set(['customers/data_request', 'customers/redact']);
 /** Age after which an unfinished event is retried: a `processing` claim is reclaimable and the sweep re-enqueues it. */
@@ -45,6 +48,7 @@ async function setStatus(
   status: EventStatus,
   now: Date,
   error: string | null = null,
+  scrub = false,
 ): Promise<void> {
   await tx
     .update(webhookEvents)
@@ -53,8 +57,8 @@ async function setStatus(
       error,
       updatedAt: now,
       ...(status === 'processed' ? { processedAt: now } : {}),
-      // Nothing is retained from a parked data-topic event: its payload can carry customer data.
-      ...(status === 'deferred' ? { payload: {} } : {}),
+      // Nothing is retained from a parked data-topic or nudge event: its payload can carry tenant data.
+      ...(status === 'deferred' || scrub ? { payload: {} } : {}),
     })
     .where(and(eq(webhookEvents.orgId, orgId), eq(webhookEvents.id, id)));
 }
@@ -143,6 +147,24 @@ export async function processWebhookEvent(
         }
         await setStatus(tx, orgId, eventId, 'processed', now());
       });
+      return 'processed';
+    }
+    const nudgeResource = nudgeResourceFor(topic);
+    if (nudgeResource !== null) {
+      // A product edit or a stock change only starts a sync; nothing from the payload is used or kept.
+      if (!deps.sync) {
+        await deps.db.withTenant(orgId, (tx) =>
+          setStatus(tx, orgId, eventId, 'ignored', now(), null, true),
+        );
+        return 'ignored';
+      }
+      await nudgeSync(
+        { db: deps.db, queue: deps.sync.queue, now },
+        { orgId, connectionId: storeConnectionId, resource: nudgeResource },
+      );
+      await deps.db.withTenant(orgId, (tx) =>
+        setStatus(tx, orgId, eventId, 'processed', now(), null, true),
+      );
       return 'processed';
     }
     return await deps.db.withTenant(orgId, async (tx) => {

@@ -100,3 +100,43 @@ export function exchangeCodeForToken(
     requireExpiring: false,
   });
 }
+
+/**
+ * Exchanges a refresh token for a NEW access token AND a NEW refresh token (rotation): the presented
+ * refresh token is dead afterwards, so the caller must persist the returned pair atomically and must
+ * never call this twice with the same token (packages/sync/src/tokens.ts does it under a row lock).
+ * A 401 is final (unknown, replaced, expired, revoked or uninstalled all look the same); network
+ * errors, timeouts, 5xx and 429 are retryable with the SAME refresh token because Shopify never
+ * consumed it.
+ */
+export async function refreshAccessToken(
+  http: HttpClient,
+  p: { shop: string; apiKey: string; apiSecret: string; refreshToken: string },
+): Promise<ShopifyRefreshGrant> {
+  const grant = await requestToken(http, {
+    shop: p.shop,
+    form: {
+      client_id: p.apiKey,
+      client_secret: p.apiSecret,
+      grant_type: 'refresh_token',
+      refresh_token: p.refreshToken,
+    },
+    authMessage: SHOPIFY_RECONNECT_MESSAGE,
+    rejectedMessage: 'Shopify rejected the refresh request',
+    requireExpiring: true,
+  });
+  // requireExpiring guarantees the three fields; checking narrows the type without a cast.
+  if (
+    grant.accessTokenExpiresInSec === null ||
+    grant.refreshToken === null ||
+    grant.refreshTokenExpiresInSec === null
+  ) {
+    throw new PermanentError(UNREADABLE);
+  }
+  return {
+    ...grant,
+    accessTokenExpiresInSec: grant.accessTokenExpiresInSec,
+    refreshToken: grant.refreshToken,
+    refreshTokenExpiresInSec: grant.refreshTokenExpiresInSec,
+  };
+}

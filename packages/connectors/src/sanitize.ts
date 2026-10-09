@@ -12,10 +12,10 @@ export function sanitizeMessage(input: unknown, max = 500): string {
     text = 'unprintable error';
   }
   text = text
-    .replace(/\bshp(?:at|ca|ss|pa)_[A-Za-z0-9]+/gi, '[redacted]')
+    .replace(/\bshp(?:at|ca|ss|pa|rt)_[A-Za-z0-9]+/gi, '[redacted]')
     .replace(/\bBearer\s+[A-Za-z0-9._~+/=-]+/gi, 'Bearer [redacted]')
     .replace(
-      /\b(access_token|client_secret|api_secret|secret|token|password|hmac|code)["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s&,;"']+)/gi,
+      /\b(access_token|refresh_token|client_secret|api_secret|secret|token|password|hmac|code)["']?\s*[=:]\s*(?:"[^"]*"|'[^']*'|[^\s&,;"']+)/gi,
       '$1=[redacted]',
     )
     .replace(/\?[^\s#]*(#\S*)?/g, '?[redacted]')

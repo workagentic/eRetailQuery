@@ -56,4 +56,14 @@ describe('sanitizeMessage', () => {
   it('redacts uppercase Shopify token prefixes', () => {
     expect(sanitizeMessage('SHPAT_0123abc')).not.toMatch(/SHPAT_0123/);
   });
+  it('redacts refresh tokens by prefix and by key, using the real values', () => {
+    const short = 'shprt_0123456789abcdef'; // too short for the long-token rule: only the prefix rule can catch it
+    const out = sanitizeMessage(
+      `refresh failed ${short} refresh_token=plainvalue1 {"refresh_token":"jsonvalue2"} refresh_token: colon3`,
+    );
+    for (const secret of [short, 'plainvalue1', 'jsonvalue2', 'colon3']) {
+      expect(out).not.toContain(secret);
+    }
+    expect(out).toContain('[redacted]');
+  });
 });

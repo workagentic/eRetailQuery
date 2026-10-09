@@ -188,6 +188,13 @@ describe('GET /orgs/:orgId/connections and disconnect', () => {
           historyLimited: true,
           error: null,
           canStart: true,
+          resources: [
+            { resource: 'locations', state: 'never', lastCompletedAt: null, error: null },
+            { resource: 'products', state: 'never', lastCompletedAt: null, error: null },
+            { resource: 'inventory', state: 'never', lastCompletedAt: null, error: null },
+            { resource: 'orders', state: 'never', lastCompletedAt: null, error: null },
+          ],
+          unlinkedLines: 0,
         },
       },
     ]);
@@ -1077,6 +1084,13 @@ describe('sync summary', () => {
       historyLimited: true,
       error: null,
       canStart: true,
+      resources: [
+        { resource: 'locations', state: 'never', lastCompletedAt: null, error: null },
+        { resource: 'products', state: 'never', lastCompletedAt: null, error: null },
+        { resource: 'inventory', state: 'never', lastCompletedAt: null, error: null },
+        { resource: 'orders', state: 'never', lastCompletedAt: null, error: null },
+      ],
+      unlinkedLines: 0,
     });
     expect(await summary(orgId, h, b)).toMatchObject({ historyLimited: false });
   });
@@ -1338,5 +1352,131 @@ describe('sync now', () => {
     expect(cursors.rows.every((r) => r.status !== 'running')).toBe(true);
     syncQueue.fail = false;
     expect((await post(orgId, id, h)).body).toEqual({ started: true });
+  });
+});
+
+describe('per-resource sync status', () => {
+  async function connection(orgId: string, shop: string, lastSyncedAt: string | null = null) {
+    const { rows } = await owner.query(
+      `insert into store_connections (org_id, platform, external_account_id, status, encrypted_credentials, last_synced_at)
+       values ($1, 'shopify', $2, 'active', 'ciphertext', $3) returning id`,
+      [orgId, shop, lastSyncedAt],
+    );
+    return rows[0].id as string;
+  }
+  const cursor = (
+    org: string,
+    conn: string,
+    resource: string,
+    status: string,
+    syncedAt: string | null,
+    error: string | null = null,
+  ) =>
+    owner.query(
+      `insert into sync_cursors (org_id, store_connection_id, resource, status, last_synced_at, last_error) values ($1, $2, $3, $4, $5, $6)`,
+      [org, conn, resource, status, syncedAt, error],
+    );
+  const first = async (orgId: string, h: Record<string, string>) =>
+    (await request(server()).get(`/orgs/${orgId}/connections`).set(h)).body[0];
+  async function lineOn(
+    org: string,
+    conn: string,
+    ext: string,
+    opts: { variant: string | null; test?: boolean; sku?: string | null },
+  ) {
+    const { rows } = await owner.query(
+      `insert into orders (org_id, store_connection_id, external_order_id, channel, status, placed_at, currency, gross_cents,
+         discount_cents, shipping_charged_cents, tax_cents, refund_cents, net_cents, is_test, external_updated_at)
+       values ($1, $2, $3, 'shopify_online', 'closed', now(), 'USD', 0, 0, 0, 0, 0, 0, $4, now()) returning id`,
+      [org, conn, ext, opts.test ?? false],
+    );
+    await owner.query(
+      `insert into order_lines (org_id, order_id, sku_id, external_line_id, external_variant_id, title, quantity, unit_price_cents)
+       values ($1, $2, $3, 'l-1', $4, 'Line', 1, 100)`,
+      [org, rows[0].id, opts.sku ?? null, opts.variant],
+    );
+  }
+
+  it('reports each resource with its own state, completion time and error, in import order', async () => {
+    const { orgId, h } = await createOrg('Resources Org');
+    const id = await connection(orgId, 'res1.myshopify.com');
+    await cursor(orgId, id, 'locations', 'complete', '2026-10-08T12:00:00.000Z');
+    await cursor(orgId, id, 'products', 'running', '2026-10-08T11:30:00.000Z');
+    await cursor(
+      orgId,
+      id,
+      'inventory',
+      'failed',
+      '2026-10-08T11:00:00.000Z',
+      'Shopify rate limit hit.',
+    );
+    const body = await first(orgId, h);
+    expect(body.sync.resources).toEqual([
+      {
+        resource: 'locations',
+        state: 'idle',
+        lastCompletedAt: '2026-10-08T12:00:00.000Z',
+        error: null,
+      },
+      {
+        resource: 'products',
+        state: 'running',
+        lastCompletedAt: '2026-10-08T11:30:00.000Z',
+        error: null,
+      },
+      {
+        resource: 'inventory',
+        state: 'failed',
+        lastCompletedAt: '2026-10-08T11:00:00.000Z',
+        error: 'Shopify rate limit hit.',
+      },
+      { resource: 'orders', state: 'never', lastCompletedAt: null, error: null },
+    ]);
+    // the aggregate fields keep their meaning
+    expect(body.sync).toMatchObject({ state: 'running', resource: 'products' });
+  });
+  it('a cursor row that never completed reads never, even when it exists', async () => {
+    const { orgId, h } = await createOrg('Never Org');
+    const id = await connection(orgId, 'res2.myshopify.com');
+    await cursor(orgId, id, 'orders', 'idle', null);
+    const body = await first(orgId, h);
+    expect(body.sync.resources.find((r: { resource: string }) => r.resource === 'orders')).toEqual({
+      resource: 'orders',
+      state: 'never',
+      lastCompletedAt: null,
+      error: null,
+    });
+  });
+  it('leaves the connection time as the stored column (the oldest resource, never "now")', async () => {
+    const { orgId, h } = await createOrg('Column Org');
+    await connection(orgId, 'res3.myshopify.com', '2026-10-08T10:00:00.000Z');
+    expect((await first(orgId, h)).lastSyncedAt).toBe('2026-10-08T10:00:00.000Z');
+  });
+  it('counts only unlinked lines of this connection that carry a variant, never test orders or other orgs', async () => {
+    const { orgId, h } = await createOrg('Unlinked Org');
+    const id = await connection(orgId, 'res4.myshopify.com');
+    const sibling = await connection(orgId, 'res5.myshopify.com');
+    await lineOn(orgId, id, 'o-1', { variant: 'v-1' });
+    await lineOn(orgId, id, 'o-2', { variant: 'v-2' });
+    await lineOn(orgId, id, 'o-3', { variant: null }); // no variant: nothing to link to
+    await lineOn(orgId, id, 'o-4', { variant: 'v-4', test: true }); // test orders are not real sales
+    await lineOn(orgId, sibling, 'o-5', { variant: 'v-5' }); // another connection
+    const other = await createOrg('Other Unlinked Org');
+    const otherConn = await connection(other.orgId, 'res6.myshopify.com');
+    await lineOn(other.orgId, otherConn, 'o-6', { variant: 'v-6' }); // another org
+    const body = (await request(server()).get(`/orgs/${orgId}/connections`).set(h)).body;
+    const mine = body.find((c: { id: string }) => c.id === id);
+    const theirs = body.find((c: { id: string }) => c.id === sibling);
+    expect([mine.sync.unlinkedLines, theirs.sync.unlinkedLines]).toEqual([2, 1]);
+    expect(JSON.stringify(body)).not.toContain(other.orgId);
+  });
+  it('is readable by a viewer and never exposes credentials', async () => {
+    const { orgId } = await createOrg('Viewer Resources Org');
+    await connection(orgId, 'res7.myshopify.com');
+    const viewer = await addMember(orgId, 'viewer');
+    const res = await request(server()).get(`/orgs/${orgId}/connections`).set(viewer);
+    expect(res.status).toBe(200);
+    expect(res.body[0].sync.resources).toHaveLength(4);
+    expect(JSON.stringify(res.body)).not.toMatch(/ciphertext|credential|token/i);
   });
 });

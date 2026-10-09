@@ -1,5 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
-import { and, eq, lt, min, sql } from 'drizzle-orm';
+import { and, count, eq, isNotNull, isNull, lt, min, sql } from 'drizzle-orm';
 import type { Logger } from 'pino';
 import {
   buildAuthorizeUrl,
@@ -24,6 +24,7 @@ import {
   hashOAuthNonce,
   insertAudit,
   oauthStates,
+  orderLines,
   orders,
   orgMembers,
   storeConnections,
@@ -34,6 +35,7 @@ import {
 import {
   hasRole,
   type ConnectionDto,
+  type ConnectionResourceDto,
   type ConnectionSyncDto,
   type InstallResponse,
   type KeyProvider,
@@ -320,6 +322,7 @@ export class ConnectionsService {
           status: syncCursors.status,
           recordsProcessed: syncCursors.recordsProcessed,
           lastError: syncCursors.lastError,
+          lastSyncedAt: syncCursors.lastSyncedAt,
         })
         .from(syncCursors)
         .where(eq(syncCursors.orgId, orgId));
@@ -329,6 +332,24 @@ export class ConnectionsService {
         // Test orders are not real sales history, so they never widen the covered range.
         .where(and(eq(orders.orgId, orgId), eq(orders.isTest, false)))
         .groupBy(orders.storeConnectionId);
+      const unlinked = await tx
+        .select({ connectionId: orders.storeConnectionId, n: count() })
+        .from(orderLines)
+        .innerJoin(
+          orders,
+          and(eq(orders.orgId, orderLines.orgId), eq(orders.id, orderLines.orderId)),
+        )
+        .where(
+          and(
+            // RLS already scopes the rows; the explicit org filter is defence in depth.
+            eq(orders.orgId, orgId),
+            isNull(orderLines.skuId),
+            isNotNull(orderLines.externalVariantId),
+            eq(orders.isTest, false),
+          ),
+        )
+        .groupBy(orders.storeConnectionId);
+      const unlinkedBy = new Map(unlinked.map((u) => [u.connectionId, u.n]));
       const byConn = new Map<string, typeof cursors>();
       for (const c of cursors) {
         const list = byConn.get(c.connectionId) ?? [];
@@ -343,7 +364,12 @@ export class ConnectionsService {
         status: r.status,
         lastSyncedAt: r.lastSyncedAt?.toISOString() ?? null,
         lastError: r.lastError,
-        sync: this.summarize(r, byConn.get(r.id) ?? [], coveredBy.get(r.id) ?? null),
+        sync: this.summarize(
+          r,
+          byConn.get(r.id) ?? [],
+          coveredBy.get(r.id) ?? null,
+          unlinkedBy.get(r.id) ?? 0,
+        ),
       }));
     });
   }
@@ -355,8 +381,10 @@ export class ConnectionsService {
       status: string;
       recordsProcessed: number;
       lastError: string | null;
+      lastSyncedAt: Date | null;
     }[],
     coveredFrom: Date | null,
+    unlinkedLines: number,
   ): ConnectionSyncDto {
     const ordered = SYNC_RESOURCE_ORDER.flatMap((r) => cursors.filter((c) => c.resource === r));
     const running = ordered.find((c) => c.status === 'running');
@@ -364,6 +392,21 @@ export class ConnectionsService {
     const allComplete = SYNC_RESOURCE_ORDER.every((r) =>
       cursors.some((c) => c.resource === r && c.status === 'complete'),
     );
+    const resources = SYNC_RESOURCE_ORDER.map((resource): ConnectionResourceDto => {
+      const c = cursors.find((x) => x.resource === resource);
+      const lastCompletedAt = c?.lastSyncedAt?.toISOString() ?? null;
+      if (!c) return { resource, state: 'never', lastCompletedAt: null, error: null };
+      if (c.status === 'running')
+        return { resource, state: 'running', lastCompletedAt, error: null };
+      if (c.status === 'failed')
+        return { resource, state: 'failed', lastCompletedAt, error: c.lastError };
+      return {
+        resource,
+        state: lastCompletedAt === null ? 'never' : 'idle',
+        lastCompletedAt,
+        error: null,
+      };
+    });
     const base = {
       coveredFrom: coveredFrom?.toISOString() ?? null,
       historyLimited: !(conn.scopes ?? []).includes('read_all_orders'),
@@ -371,6 +414,8 @@ export class ConnectionsService {
         this.syncQueue.available &&
         (conn.status === 'active' || conn.status === 'error') &&
         !running,
+      resources,
+      unlinkedLines,
     };
     if (running) {
       return {

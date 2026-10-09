@@ -3,6 +3,17 @@ import { z } from 'zod';
 export const installShopifyInput = z.object({ shop: z.string().trim().min(3).max(255) });
 export type InstallShopifyInput = z.infer<typeof installShopifyInput>;
 
+export type ConnectionResourceName = 'locations' | 'products' | 'inventory' | 'orders';
+export interface ConnectionResourceDto {
+  resource: ConnectionResourceName;
+  /** never: not imported yet; running: importing now; failed: the last attempt failed; idle: imported before. */
+  state: 'never' | 'running' | 'failed' | 'idle';
+  /** When this resource last finished importing (ISO), or null. A failed resource keeps its last good time. */
+  lastCompletedAt: string | null;
+  /** Stored, already sanitized failure text, else null. */
+  error: string | null;
+}
+
 export interface ConnectionSyncDto {
   state: 'never' | 'running' | 'idle' | 'failed';
   /** The resource currently importing or that failed ('locations' | 'products' | 'inventory' | 'orders'), else null. */
@@ -15,6 +26,10 @@ export interface ConnectionSyncDto {
   error: string | null;
   /** False when the server cannot start syncs (no queue configured) or the connection is not usable. */
   canStart: boolean;
+  /** One entry per resource, in import order (locations, products, inventory, orders). */
+  resources: ConnectionResourceDto[];
+  /** Order lines whose product is not imported yet, so their cost is not counted. */
+  unlinkedLines: number;
 }
 
 export interface SyncNowResponse {

@@ -20,6 +20,8 @@ const sync = (over: Partial<ConnectionSyncDto> = {}): ConnectionSyncDto => ({
   historyLimited: false,
   error: null,
   canStart: true,
+  resources: [],
+  unlinkedLines: 0,
   ...over,
 });
 const conn = (over: Partial<ConnectionDto> = {}): ConnectionDto => ({

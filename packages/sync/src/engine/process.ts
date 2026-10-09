@@ -3,7 +3,6 @@ import {
   AuthError,
   PermanentError,
   RateLimitedError,
-  decryptConnectionCredentials,
   type NormalizedInventoryLevel,
   type NormalizedLocation,
   type NormalizedOrder,
@@ -20,6 +19,7 @@ import { upsertInventory } from '../sinks/inventory';
 import { upsertLocations } from '../sinks/locations';
 import { upsertOrders } from '../sinks/orders';
 import { upsertProducts } from '../sinks/products';
+import { createTokenService } from '../tokens';
 import { nowOf, type SyncDeps } from './deps';
 import { failRun, IMPORT_NOT_STARTED_MESSAGE, safeMessage } from './fail';
 import { startRun } from './start';
@@ -56,13 +56,15 @@ function isDataError(error: unknown): boolean {
  */
 export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise<PageResult> {
   const now = nowOf(deps);
+  const tokens =
+    deps.tokens ??
+    createTokenService({ db: deps.db, keyProvider: deps.keyProvider, now: deps.now });
   const loaded = await deps.db.withTenant(job.orgId, async (tx) => {
     const [connection] = await tx
       .select({
         id: storeConnections.id,
         platform: storeConnections.platform,
         externalAccountId: storeConnections.externalAccountId,
-        encryptedCredentials: storeConnections.encryptedCredentials,
       })
       .from(storeConnections)
       .where(eq(storeConnections.id, job.connectionId));
@@ -112,11 +114,12 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
   let page: Page<unknown>;
   try {
     const connector = deps.connectors.get(connection.platform);
-    const credentials = decryptConnectionCredentials(
-      connection.encryptedCredentials,
-      deps.keyProvider,
-      connection.id,
-    );
+    // Refreshes an expiring Shopify token first, under the connection row lock. The connector only ever
+    // receives { accessToken }, and an AuthError or PermanentError here fails the run through the catch below.
+    const credentials = await tokens.ensureFresh({
+      orgId: job.orgId,
+      connectionId: connection.id,
+    });
     page = await connector.fetchPage(
       { connectionId: connection.id, externalAccountId: connection.externalAccountId, credentials },
       job.resource,

@@ -2,16 +2,19 @@ import {
   AuthError,
   PermanentError,
   RateLimitedError,
+  SHOPIFY_RECONNECT_MESSAGE,
   TransientError,
   encryptConnectionCredentials,
+  type ShopifyRefreshGrant,
 } from '@erq/connectors';
 import { sampleData } from '@erq/connectors/testing';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { enqueueSync } from '../src/engine/start';
 import { failSyncRun, IMPORT_NOT_STARTED_MESSAGE } from '../src/engine/fail';
 import { processSyncPage } from '../src/engine/process';
 import { resumeStalledRuns } from '../src/engine/resume';
 import type { RateLimiter, SyncPageJob } from '../src/ports';
+import { createTokenService } from '../src/tokens';
 import { drain, makeHarness, resetSync } from './engine-helpers';
 import { CONN_A, ORG_A, ORG_B, startEnv, type TestEnv } from './helpers';
 
@@ -565,5 +568,170 @@ describe('drain helper sanity', () => {
     });
     const results = await drain(h);
     expect(results.map((r) => r.kind)).toEqual(['done']);
+  });
+});
+
+describe('token refresh in the engine', () => {
+  const NOWMS = Date.parse('2026-10-06T12:00:00Z');
+  const SEED_RT = 'shprt_seed_0123456789';
+  const seedExpiring = (h: ReturnType<typeof makeHarness>, accessInMs: number) =>
+    env.owner.query(
+      `update store_connections set encrypted_credentials = $1, status = 'active', last_error = null where id = $2`,
+      [
+        encryptConnectionCredentials(
+          {
+            accessToken: 'shpat_old_0123456789',
+            accessTokenExpiresAt: new Date(NOWMS + accessInMs).toISOString(),
+            refreshToken: SEED_RT,
+            refreshTokenExpiresAt: new Date(NOWMS + 80 * 86_400_000).toISOString(),
+          },
+          h.keyProvider,
+          CONN_A,
+        ),
+        CONN_A,
+      ],
+    );
+  const grant: ShopifyRefreshGrant = {
+    accessToken: 'shpat_new_0123456789',
+    scopes: [],
+    accessTokenExpiresInSec: 3600,
+    refreshToken: 'shprt_new_0123456789',
+    refreshTokenExpiresInSec: 7_776_000,
+  };
+  const row = async () =>
+    (
+      await env.owner.query(
+        `select status, last_error, encrypted_credentials from store_connections where id = $1`,
+        [CONN_A],
+      )
+    ).rows[0];
+  afterEach(() =>
+    env.owner.query(
+      `update store_connections set encrypted_credentials = null, status = 'active', last_error = null where id = $1`,
+      [CONN_A],
+    ),
+  );
+
+  it('refreshes before the fetch, hands the connector ONLY the access token, and keeps every token out of job and run', async () => {
+    const h = makeHarness(env);
+    await seedExpiring(h, 60_000);
+    const presented: string[] = [];
+    h.deps.tokens = createTokenService({
+      db: env.db,
+      keyProvider: h.keyProvider,
+      now: h.clock.now,
+      refresh: async ({ refreshToken }) => {
+        presented.push(refreshToken);
+        return grant;
+      },
+    });
+    const job = await start(h, 'locations');
+    expect(await processSyncPage(h.deps, job)).toEqual({ kind: 'done' });
+    expect(presented).toEqual([SEED_RT]);
+    expect(h.connector.calls[0]!.credentials).toEqual({ accessToken: 'shpat_new_0123456789' });
+    const visible = JSON.stringify([
+      job,
+      await runRow(job.syncRunId),
+      await cursorRow('locations'),
+    ]);
+    for (const secret of [
+      'shpat_new_0123456789',
+      'shprt_new_0123456789',
+      SEED_RT,
+      'shpat_old_0123456789',
+    ]) {
+      expect(visible).not.toContain(secret);
+    }
+  });
+  it('does not refresh a token that is far from expiry', async () => {
+    const h = makeHarness(env);
+    await seedExpiring(h, 3_600_000);
+    let called = 0;
+    h.deps.tokens = createTokenService({
+      db: env.db,
+      keyProvider: h.keyProvider,
+      now: h.clock.now,
+      refresh: async () => {
+        called += 1;
+        return grant;
+      },
+    });
+    await processSyncPage(h.deps, await start(h, 'locations'));
+    expect(called).toBe(0);
+    expect(h.connector.calls[0]!.credentials).toEqual({ accessToken: 'shpat_old_0123456789' });
+  });
+  it('a final refresh failure errors the connection with the fixed reconnect text, fails the run and sends no further job', async () => {
+    const h = makeHarness(env);
+    await seedExpiring(h, 60_000);
+    h.deps.tokens = createTokenService({
+      db: env.db,
+      keyProvider: h.keyProvider,
+      now: h.clock.now,
+      refresh: async () => {
+        throw new AuthError(SHOPIFY_RECONNECT_MESSAGE);
+      },
+    });
+    await enqueueSync(h.deps, {
+      orgId: ORG_A,
+      connectionId: CONN_A,
+      resources: 'all',
+      mode: 'backfill',
+      since,
+    });
+    const first = h.queue.take()!.job;
+    expect(await processSyncPage(h.deps, first)).toEqual({
+      kind: 'failed',
+      reason: SHOPIFY_RECONNECT_MESSAGE,
+    });
+    const c = await row();
+    expect([c.status, c.last_error]).toEqual(['error', SHOPIFY_RECONNECT_MESSAGE]);
+    expect((await cursorRow('locations')).status).toBe('failed');
+    expect(h.queue.size).toBe(0);
+    expect(JSON.stringify(c)).not.toContain(SEED_RT);
+  });
+  it('rethrows a transient refresh failure for the queue to retry, leaving the run and the stored pair alone', async () => {
+    const h = makeHarness(env);
+    await seedExpiring(h, 60_000);
+    const before = (await row()).encrypted_credentials;
+    h.deps.tokens = createTokenService({
+      db: env.db,
+      keyProvider: h.keyProvider,
+      now: h.clock.now,
+      refresh: async () => {
+        throw new TransientError('Shopify is temporarily unavailable');
+      },
+    });
+    const job = await start(h, 'locations');
+    await expect(processSyncPage(h.deps, job)).rejects.toBeInstanceOf(TransientError);
+    expect((await cursorRow('locations')).status).toBe('running');
+    expect((await row()).encrypted_credentials).toBe(before);
+  });
+  it('turns a rate-limited refresh into a delayed job', async () => {
+    const h = makeHarness(env);
+    await seedExpiring(h, 60_000);
+    h.deps.tokens = createTokenService({
+      db: env.db,
+      keyProvider: h.keyProvider,
+      now: h.clock.now,
+      refresh: async () => {
+        throw new RateLimitedError(3000);
+      },
+    });
+    expect(await processSyncPage(h.deps, await start(h, 'locations'))).toEqual({
+      kind: 'delayed',
+      delayMs: 3000,
+    });
+  });
+  it('sanitizes a stored failure that carries a refresh token', async () => {
+    const h = makeHarness(env);
+    const job = await start(h, 'locations');
+    await failSyncRun(
+      h.deps,
+      job,
+      `refresh failed for ${SEED_RT} with client_secret=topsecretvalue`,
+    );
+    const stored = JSON.stringify(await cursorRow('locations'));
+    expect(stored).not.toContain(SEED_RT);
+    expect(stored).not.toContain('topsecretvalue');
   });
 });

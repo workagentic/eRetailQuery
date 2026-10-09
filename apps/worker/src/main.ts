@@ -9,6 +9,7 @@ import type { SyncDeps } from '@erq/sync';
 import { BullMqJobQueue, SYNC_QUEUE } from './sync/bullmq-queue';
 import { createWorkerConnectors } from './sync/connectors';
 import { RedisRateLimiter } from './sync/redis-rate-limiter';
+import { createWorkerTokenService } from './sync/tokens';
 import { createSyncWorker, scheduleResumeStalled } from './sync/worker';
 import { createSystemWorker, SYSTEM_QUEUE } from './system-worker';
 import { processWebhookEvent } from './webhooks/handler';
@@ -44,12 +45,19 @@ async function main(): Promise<void> {
   let syncQueue: Queue | undefined;
   if (db && process.env.ENCRYPTION_KEY) {
     syncQueue = new Queue(SYNC_QUEUE, { connection });
+    const keyProvider = EnvKeyProvider.fromEnv(process.env);
+    if (!process.env.SHOPIFY_API_KEY || !process.env.SHOPIFY_API_SECRET) {
+      log.warn(
+        'SHOPIFY_API_KEY or SHOPIFY_API_SECRET is missing: expiring Shopify tokens cannot be refreshed',
+      );
+    }
     const deps: SyncDeps = {
       db,
       connectors: createWorkerConnectors(process.env),
       limiter: new RedisRateLimiter(connection),
       queue: new BullMqJobQueue(syncQueue),
-      keyProvider: EnvKeyProvider.fromEnv(process.env),
+      keyProvider,
+      tokens: createWorkerTokenService(process.env, db, keyProvider),
     };
     syncWorker = createSyncWorker(deps, connection, {
       concurrency: Number(process.env.SYNC_CONCURRENCY ?? 5),

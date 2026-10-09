@@ -6,6 +6,7 @@ import {
   TransientError,
   encryptConnectionCredentials,
   type ShopifyRefreshGrant,
+  type SyncResource,
 } from '@erq/connectors';
 import { sampleData } from '@erq/connectors/testing';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
@@ -52,6 +53,17 @@ async function start(
     since: mode === 'backfill' ? since : undefined,
   });
   return h.queue.take()!.job;
+}
+
+async function waitUntilBlocked(): Promise<void> {
+  for (let i = 0; i < 100; i += 1) {
+    const { rows } = await env.owner.query(
+      `select 1 from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock' and pid <> pg_backend_pid()`,
+    );
+    if (rows.length > 0) return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  throw new Error('the chain end never waited for the connection row lock');
 }
 
 describe('enqueueSync', () => {
@@ -439,12 +451,12 @@ describe('connection health', () => {
       since,
     });
 
-  it('records last_synced_at when a single-resource run completes and keeps the status', async () => {
+  it('a single-resource run keeps the connection status and does not claim the connection is fresh', async () => {
     const h = makeHarness(env);
     await processSyncPage(h.deps, await start(h, 'locations'));
     const c = await conn();
     expect(c.status).toBe('active');
-    expect(c.last_synced_at.toISOString()).toBe('2026-10-06T12:00:00.000Z');
+    expect(c.last_synced_at).toBeNull();
   });
   it('returns an errored connection to active after the last page of a chain', async () => {
     await setConn('error', 'token revoked');
@@ -547,12 +559,44 @@ describe('connection health', () => {
   });
   it('is not changed again by a duplicated final job', async () => {
     const h = makeHarness(env);
-    const job = await start(h, 'locations');
-    await processSyncPage(h.deps, job);
+    await runAll(h);
+    const first = h.queue.take()!.job; // the locations job
+    await h.queue.enqueue(first);
+    await drain(h);
     const before = (await conn()).last_synced_at.toISOString();
     h.clock.advance(3_600_000);
-    expect(await processSyncPage(h.deps, job)).toEqual({ kind: 'done' });
+    expect(await processSyncPage(h.deps, first)).toEqual({ kind: 'done' }); // stale: its run finished
     expect((await conn()).last_synced_at.toISOString()).toBe(before);
+  });
+  it('does not recover an errored connection when another job fails a cursor while this chain ends (row lock)', async () => {
+    await setConn('error', 'token revoked');
+    // No orders in the page: the sink then takes no foreign-key lock, so the ONLY thing that can make the
+    // chain end wait is the explicit connection row lock.
+    const h = makeHarness(env, { data: { ...sampleData(), orders: [] } });
+    const job = await start(h, 'orders');
+    const blocker = await env.owner.connect();
+    try {
+      await blocker.query('begin');
+      // The blocker holds FOR NO KEY UPDATE: the same mode the chain end now takes (and the mode of the token
+      // refresh), so the chain end's own `for no key update` conflicts with it and must wait. (The blocker's
+      // own insert into sync_cursors below takes FOR KEY SHARE on the connection row, which its own lock allows.)
+      await blocker.query('select id from store_connections where id = $1 for no key update', [
+        CONN_A,
+      ]);
+      const ending = processSyncPage(h.deps, job);
+      await waitUntilBlocked();
+      await blocker.query(
+        `insert into sync_cursors (org_id, store_connection_id, resource, status, last_error)
+         values ($1, $2, 'inventory', 'failed', 'boom')`,
+        [ORG_A, CONN_A],
+      );
+      await blocker.query('commit');
+      await ending;
+    } finally {
+      blocker.release();
+    }
+    const c = await conn();
+    expect([c.status, c.last_error]).toEqual(['error', 'token revoked']); // the failed cursor was seen after the lock
   });
 });
 
@@ -733,5 +777,135 @@ describe('token refresh in the engine', () => {
     const stored = JSON.stringify(await cursorRow('locations'));
     expect(stored).not.toContain(SEED_RT);
     expect(stored).not.toContain('topsecretvalue');
+  });
+});
+
+// Kept last: these runs insert orders, and an earlier test counts the orders table.
+const runMode = async (
+  h: ReturnType<typeof makeHarness>,
+  resources: SyncResource[],
+  mode: 'backfill' | 'incremental' | 'full',
+) => {
+  await enqueueSync(h.deps, {
+    orgId: ORG_A,
+    connectionId: CONN_A,
+    resources,
+    mode,
+    since: mode === 'backfill' ? since : undefined,
+  });
+  await drain(h);
+};
+const latestRun = async () =>
+  (
+    await env.owner.query(
+      `select type from sync_runs where connection_id = $1 order by started_at desc limit 1`,
+      [CONN_A],
+    )
+  ).rows[0];
+
+describe('full passes', () => {
+  it('a full run reads without a filter and stamps last_full_pass_at; an incremental run filters and does not', async () => {
+    const h = makeHarness(env);
+    await runMode(h, ['products'], 'backfill');
+    expect((await cursorRow('products')).last_full_pass_at.toISOString()).toBe(
+      '2026-10-06T12:00:00.000Z',
+    );
+
+    h.clock.advance(3_600_000);
+    await runMode(h, ['products'], 'incremental');
+    const incremental = h.connector.calls.at(-1)!;
+    expect(incremental.options.updatedSince).toBeInstanceOf(Date);
+    expect((await cursorRow('products')).last_full_pass_at.toISOString()).toBe(
+      '2026-10-06T12:00:00.000Z',
+    );
+
+    h.clock.advance(3_600_000);
+    const callsBefore = h.connector.calls.length;
+    await runMode(h, ['products'], 'full');
+    const fullCalls = h.connector.calls.slice(callsBefore);
+    expect(fullCalls.length).toBeGreaterThan(0);
+    for (const call of fullCalls) {
+      expect(call.options.updatedSince).toBeUndefined();
+      expect(call.options.since).toBeUndefined();
+    }
+    expect((await latestRun()).type).toBe('full');
+    const cursor = await cursorRow('products');
+    expect(cursor.last_full_pass_at.toISOString()).toBe('2026-10-06T14:00:00.000Z');
+    expect(cursor.updated_since.toISOString()).toBe('2026-10-06T14:00:00.000Z'); // the watermark is back after the pass
+  });
+  it('a full run needs no since, and a backfill still does', async () => {
+    const h = makeHarness(env);
+    await expect(
+      enqueueSync(h.deps, {
+        orgId: ORG_A,
+        connectionId: CONN_A,
+        resources: ['products'],
+        mode: 'full',
+      }),
+    ).resolves.toMatchObject({ resource: 'products', started: true });
+    await resetSync(env);
+    await expect(
+      enqueueSync(h.deps, {
+        orgId: ORG_A,
+        connectionId: CONN_A,
+        resources: ['products'],
+        mode: 'backfill',
+      }),
+    ).rejects.toThrow(RangeError);
+  });
+  it('a failed full run leaves the watermark cleared, so the next incremental reads everything (more data, never less)', async () => {
+    const h = makeHarness(env);
+    await runMode(h, ['products'], 'backfill');
+    h.clock.advance(60_000);
+    h.connector.failNext(new PermanentError('boom'));
+    await runMode(h, ['products'], 'full');
+    const failed = await cursorRow('products');
+    expect([failed.status, failed.updated_since]).toEqual(['failed', null]);
+    h.clock.advance(60_000);
+    const callsBefore = h.connector.calls.length;
+    await runMode(h, ['products'], 'incremental');
+    expect(h.connector.calls[callsBefore]!.options.updatedSince).toBeUndefined();
+  });
+  it('a full chain keeps its mode for every resource it carries', async () => {
+    const h = makeHarness(env);
+    await enqueueSync(h.deps, {
+      orgId: ORG_A,
+      connectionId: CONN_A,
+      resources: ['products', 'inventory'],
+      mode: 'full',
+    });
+    const first = h.queue.take()!.job;
+    expect(first.then).toEqual({ resources: ['inventory'], mode: 'full', since: null });
+  });
+});
+
+describe('connection freshness is the oldest resource', () => {
+  const connRow = async () =>
+    (await env.owner.query(`select last_synced_at from store_connections where id = $1`, [CONN_A]))
+      .rows[0];
+  beforeEach(() =>
+    env.owner.query(
+      `update store_connections set status = 'active', last_error = null, last_synced_at = null where id = $1`,
+      [CONN_A],
+    ),
+  );
+  it('a single-resource run does not mark the connection fresh', async () => {
+    const h = makeHarness(env);
+    await runMode(h, ['locations'], 'backfill');
+    expect((await cursorRow('locations')).last_synced_at.toISOString()).toBe(
+      '2026-10-06T12:00:00.000Z',
+    );
+    expect((await connRow()).last_synced_at).toBeNull();
+  });
+  it('is the OLDEST of the four resource times once all four have completed, and later runs of one resource do not move it', async () => {
+    const h = makeHarness(env);
+    await runMode(h, ['locations', 'products', 'inventory', 'orders'], 'backfill');
+    expect((await connRow()).last_synced_at.toISOString()).toBe('2026-10-06T12:00:00.000Z');
+    h.clock.advance(3_600_000);
+    await runMode(h, ['locations'], 'incremental'); // locations now 13:00, the other three still 12:00
+    expect((await connRow()).last_synced_at.toISOString()).toBe('2026-10-06T12:00:00.000Z');
+    h.clock.advance(3_600_000);
+    await runMode(h, ['products', 'inventory', 'orders'], 'incremental'); // now locations (13:00) is the oldest
+    expect((await connRow()).last_synced_at.toISOString()).toBe('2026-10-06T13:00:00.000Z');
   });
 });

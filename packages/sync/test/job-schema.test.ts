@@ -60,4 +60,22 @@ describe('parseSyncPageJob', () => {
       }),
     ).not.toThrow();
   });
+  it('accepts a full chain without since and still rejects an unknown mode', () => {
+    expect(
+      parseSyncPageJob({ ...base, then: { resources: ['inventory'], mode: 'full', since: null } })
+        .then,
+    ).toEqual({ resources: ['inventory'], mode: 'full', since: null });
+    expect(() =>
+      parseSyncPageJob({
+        ...base,
+        then: { resources: ['inventory'], mode: 'weekly', since: null },
+      }),
+    ).toThrow();
+    expect(() =>
+      parseSyncPageJob({
+        ...base,
+        then: { resources: ['inventory'], mode: 'backfill', since: null },
+      }),
+    ).toThrow();
+  });
 });

@@ -162,6 +162,13 @@
       "when": 1791417765599,
       "tag": "0022_token_expiry",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1791586046494,
+      "tag": "0023_cursor_full_pass",
+      "breakpoints": true
     }
   ]
 }

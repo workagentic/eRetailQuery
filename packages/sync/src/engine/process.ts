@@ -3,6 +3,7 @@ import {
   AuthError,
   PermanentError,
   RateLimitedError,
+  SYNC_RESOURCES,
   type NormalizedInventoryLevel,
   type NormalizedLocation,
   type NormalizedOrder,
@@ -83,7 +84,7 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
       .from(orgs)
       .where(eq(orgs.id, job.orgId));
     const [run] = await tx
-      .select({ startedAt: syncRuns.startedAt })
+      .select({ startedAt: syncRuns.startedAt, type: syncRuns.type })
       .from(syncRuns)
       .where(eq(syncRuns.id, job.syncRunId));
     return {
@@ -91,6 +92,7 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
       cursor,
       timezone: org?.timezone ?? 'UTC',
       runStartedAt: run?.startedAt ?? now,
+      runType: run?.type ?? 'incremental',
     };
   });
   if (
@@ -101,7 +103,7 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
   ) {
     return { kind: 'done' }; // stale job: nothing to do
   }
-  const { connection, cursor, timezone, runStartedAt } = loaded;
+  const { connection, cursor, timezone, runStartedAt, runType } = loaded;
 
   const policy = policyFor(connection.platform, deps.policies);
   const decision = await deps.limiter.take(
@@ -184,6 +186,8 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
                 status: 'complete' as const,
                 lastSyncedAt: now,
                 updatedSince: runStartedAt,
+                // A backfill and a full pass both read everything.
+                ...(runType === 'backfill' || runType === 'full' ? { lastFullPassAt: now } : {}),
                 currentSyncRunId: null,
                 lastError: null,
                 recordsProcessed: sql`${syncCursors.recordsProcessed} + ${result.processed}`,
@@ -200,12 +204,15 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
       // A resumed job lost its chain, so it cannot tell a real chain end: it records nothing.
       if (!job.resumed && (!job.then || job.then.resources.length === 0)) {
         // Lock the connection row (after the cursor row, the same order as failRun) so the check below sees a
-        // failed cursor committed concurrently by another job of this connection.
+        // failed cursor committed concurrently by another job of this connection. FOR NO KEY UPDATE, not FOR
+        // UPDATE: this same transaction (and every other page transaction of the connection) inserts or updates
+        // child rows that take FOR KEY SHARE on this row, and the token refresh (Task 3) holds NO KEY UPDATE
+        // across an HTTP call; FOR UPDATE would conflict with all of them (stalls, deadlocks).
         await tx
           .select({ id: storeConnections.id })
           .from(storeConnections)
           .where(eq(storeConnections.id, job.connectionId))
-          .for('update');
+          .for('no key update');
         // An errored connection recovers only when none of its resources is still running or has failed,
         // so another pending failure keeps the error visible. A disconnected connection is never touched.
         const recovers = sql`${storeConnections.status} = 'error' and not exists (
@@ -216,7 +223,13 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
         await tx
           .update(storeConnections)
           .set({
-            lastSyncedAt: now,
+            // The OLDEST resource time, and only once all four resources have completed: a single-resource run
+            // or a nudge must never make the whole connection look fresh. Reads this transaction's own cursor write.
+            lastSyncedAt: sql`coalesce((
+              select case when count(${syncCursors.lastSyncedAt}) = ${SYNC_RESOURCES.length}
+                          then min(${syncCursors.lastSyncedAt}) end
+              from ${syncCursors}
+              where ${syncCursors.storeConnectionId} = ${storeConnections.id}), ${storeConnections.lastSyncedAt})`,
             status: sql`case when ${recovers} then 'active'::connection_status else ${storeConnections.status} end`,
             lastError: sql`case when ${recovers} or ${storeConnections.lastError} = ${IMPORT_NOT_STARTED_MESSAGE} then null else ${storeConnections.lastError} end`,
           })

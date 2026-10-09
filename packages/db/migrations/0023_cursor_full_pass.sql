@@ -1,0 +1,1 @@
+ALTER TABLE "sync_cursors" ADD COLUMN "last_full_pass_at" timestamp with time zone;

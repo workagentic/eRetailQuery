@@ -68,6 +68,9 @@ export async function startRun(
       recordsProcessed: 0,
       lastError: null,
       backfillSince: args.mode === 'backfill' ? args.since : null,
+      // A full pass reads everything: forget the watermark so the connector receives no change filter.
+      // (A failed pass leaves it cleared, so the next incremental also reads everything: more data, never less.)
+      ...(args.mode === 'full' ? { updatedSince: null } : {}),
     })
     .where(eq(syncCursors.id, cursor.id));
   return { syncRunId: run!.id, created: true };

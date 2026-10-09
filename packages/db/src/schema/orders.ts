@@ -178,6 +178,8 @@ export const syncCursors = pgTable(
     backfillSince: timestamp('backfill_since', { withTimezone: true }),
     /** Watermark for incremental runs: the start time of the last completed run. */
     updatedSince: timestamp('updated_since', { withTimezone: true }),
+    /** When the last run that read EVERYTHING (a backfill or a full pass) completed. The scheduler uses it for the daily products pass. */
+    lastFullPassAt: timestamp('last_full_pass_at', { withTimezone: true }),
     currentSyncRunId: uuid('current_sync_run_id'),
     recordsProcessed: bigint('records_processed', { mode: 'number' }).notNull().default(0),
     lastSyncedAt: timestamp('last_synced_at', { withTimezone: true }),

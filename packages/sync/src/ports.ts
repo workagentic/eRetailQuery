@@ -1,6 +1,6 @@
 import type { SyncResource } from '@erq/connectors';
 
-export type SyncMode = 'backfill' | 'incremental';
+export type SyncMode = 'backfill' | 'incremental' | 'full';
 
 /** The rest of an `all` sync: resources run one after another in dependency order. */
 export interface SyncChain {

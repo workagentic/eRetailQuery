@@ -11,7 +11,7 @@ const schema = z
     then: z
       .object({
         resources: z.array(resource),
-        mode: z.enum(['backfill', 'incremental']),
+        mode: z.enum(['backfill', 'incremental', 'full']),
         since: z.string().datetime().nullable(),
       })
       .strict()

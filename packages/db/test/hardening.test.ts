@@ -13,6 +13,10 @@ const ACCOUNT_FNS = [
   'app_accept_invite(uuid, text, text)',
 ];
 const HELPER_FNS = ['app_secure_tenant_table(regclass, text, boolean)', 'app_set_updated_at()'];
+const SCHEDULE_FNS = [
+  'app_list_due_sync_resources(timestamptz, integer)',
+  'app_list_idle_refresh_connections(timestamptz, integer)',
+];
 
 let tdb: TestDatabase;
 let owner: Pool;
@@ -90,7 +94,7 @@ describe('Supabase simulation: default privileges granted to anon/authenticated'
   it.each(['anon', 'authenticated'])(
     '%s has no execute on account or helper functions',
     async (role) => {
-      for (const fn of [...ACCOUNT_FNS, ...HELPER_FNS]) {
+      for (const fn of [...ACCOUNT_FNS, ...HELPER_FNS, ...SCHEDULE_FNS]) {
         const { rows } = await sim.query(
           `select has_function_privilege($1, $2::regprocedure, 'execute') as ok`,
           [role, fn],
@@ -111,6 +115,16 @@ describe('Supabase simulation: default privileges granted to anon/authenticated'
 
   it('app_user still executes the account functions', async () => {
     for (const fn of ACCOUNT_FNS) {
+      const { rows } = await sim.query(
+        `select has_function_privilege('app_user', $1::regprocedure, 'execute') as ok`,
+        [fn],
+      );
+      expect({ fn, ok: rows[0].ok }).toEqual({ fn, ok: true });
+    }
+  });
+
+  it('app_user still executes the scheduler functions', async () => {
+    for (const fn of SCHEDULE_FNS) {
       const { rows } = await sim.query(
         `select has_function_privilege('app_user', $1::regprocedure, 'execute') as ok`,
         [fn],

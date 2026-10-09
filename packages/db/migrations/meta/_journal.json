@@ -169,6 +169,13 @@
       "when": 1791586046494,
       "tag": "0023_cursor_full_pass",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1791586393543,
+      "tag": "0024_schedule_functions",
+      "breakpoints": true
     }
   ]
 }

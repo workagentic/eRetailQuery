@@ -16,3 +16,5 @@ export * from './engine/fail';
 export * from './engine/resume';
 export * from './job-schema';
 export * from './tokens';
+export * from './schedule/cadence';
+export * from './schedule/due';

@@ -17,7 +17,7 @@ import { resumeStalledRuns } from '../src/engine/resume';
 import type { RateLimiter, SyncPageJob } from '../src/ports';
 import { createTokenService } from '../src/tokens';
 import { drain, makeHarness, resetSync } from './engine-helpers';
-import { CONN_A, ORG_A, ORG_B, startEnv, type TestEnv } from './helpers';
+import { CONN_A, ORG_A, ORG_B, seedOrder, startEnv, type TestEnv } from './helpers';
 
 let env: TestEnv;
 beforeAll(async () => {
@@ -907,5 +907,67 @@ describe('connection freshness is the oldest resource', () => {
     h.clock.advance(3_600_000);
     await runMode(h, ['products', 'inventory', 'orders'], 'incremental'); // now locations (13:00) is the oldest
     expect((await connRow()).last_synced_at.toISOString()).toBe('2026-10-06T13:00:00.000Z');
+  });
+});
+
+describe('order-line link-up after products', () => {
+  const lateOrder = async () => {
+    const orderId = await seedOrder(env.owner, {
+      orgId: ORG_A,
+      connectionId: CONN_A,
+      externalId: 'o-late',
+      placedAt: '2026-09-15T12:00:00Z',
+      lines: [{ skuId: null, qty: 1 }],
+    });
+    await env.owner.query(
+      `update order_lines set external_variant_id = 'v-1' where order_id = $1`,
+      [orderId],
+    );
+    return orderId;
+  };
+  const lineOf = async (orderId: string) =>
+    (
+      await env.owner.query(
+        `select sku_id, unit_cogs_cents_snapshot as cogs from order_lines where order_id = $1`,
+        [orderId],
+      )
+    ).rows[0];
+
+  it('links a line to the product the sync just imported and fills the cost in effect on the order date', async () => {
+    await env.owner.query(`delete from order_lines`);
+    await env.owner.query(`delete from orders`);
+    const h = makeHarness(env);
+    const orderId = await lateOrder();
+    await runMode(h, ['locations', 'products'], 'backfill'); // the sample product has variant v-1 with cost 800 from 2026-01-01
+    const row = await lineOf(orderId);
+    expect(row.sku_id).not.toBeNull();
+    expect(row.cogs).toBe('800');
+  });
+  it('a failure in the link-up never fails the finished products run, and the next run repeats it', async () => {
+    await env.owner.query(`delete from order_lines`);
+    await env.owner.query(`delete from orders`);
+    const h = makeHarness(env);
+    const orderId = await lateOrder();
+    const job = await start(h, 'products');
+    const first = await processSyncPage(h.deps, job); // page 1 of 2
+    if (first.kind !== 'next') throw new Error('expected a second page');
+    const realDb = h.deps.db;
+    let calls = 0;
+    // The tenant transactions of the second page job, in order: load (1), token read (2, the engine's default
+    // token service reads the credentials first), page transaction (3, it commits the cursor as `complete`),
+    // link-up (4) fails. Counting from the start of THIS job, not of the test.
+    h.deps.db = {
+      ...realDb,
+      withTenant: (org: string, fn: Parameters<typeof realDb.withTenant>[1]) =>
+        ++calls >= 4 ? Promise.reject(new Error('link-up db down')) : realDb.withTenant(org, fn),
+    } as typeof realDb;
+    expect(await processSyncPage(h.deps, first.job)).toEqual({ kind: 'done' });
+    h.deps.db = realDb;
+    expect(calls).toBe(4); // the link-up WAS attempted (and failed) after the page transaction committed
+    expect((await cursorRow('products')).status).toBe('complete');
+    expect((await lineOf(orderId)).sku_id).toBeNull();
+    h.clock.advance(60_000);
+    await runMode(h, ['products'], 'incremental');
+    expect((await lineOf(orderId)).sku_id).not.toBeNull();
   });
 });

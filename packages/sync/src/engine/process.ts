@@ -13,6 +13,7 @@ import {
 } from '@erq/connectors';
 import { orgs, storeConnections, syncCursors, syncRuns, type Tx } from '@erq/db';
 import { toOrgDate } from '../cogs';
+import { linkOrderLines } from '../linkup';
 import type { PageResult, SyncPageJob } from '../ports';
 import { policyFor } from '../policies';
 import type { SinkContext, SinkResult } from '../sinks/context';
@@ -152,8 +153,9 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
     costEffectiveFrom: toOrgDate(cursor.backfillSince ?? now, timezone),
   };
 
+  const outcome = { productsCompleted: false };
   try {
-    return await deps.db.withTenant(job.orgId, async (tx): Promise<PageResult> => {
+    const result = await deps.db.withTenant(job.orgId, async (tx): Promise<PageResult> => {
       // Compare-and-set: if another worker already advanced this cursor, this page is stale.
       const [fresh] = await tx
         .select()
@@ -199,6 +201,7 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
         )
         .where(eq(syncCursors.id, cursor.id));
       if (!done) return { kind: 'next', job };
+      if (job.resource === 'products') outcome.productsCompleted = true;
 
       // Connection health: only the real end of a chain counts. A chain still in progress records nothing.
       // A resumed job lost its chain, so it cannot tell a real chain end: it records nothing.
@@ -261,6 +264,17 @@ export async function processSyncPage(deps: SyncDeps, job: SyncPageJob): Promise
       }
       return followUp ? { kind: 'done', followUp } : { kind: 'done' };
     });
+    // The page transaction holds the cursor lock, so the link-up runs only after the products chain end has
+    // COMMITTED, in its own bounded transactions. It is idempotent and best effort: a failure here never fails the
+    // finished run, and the next products run repeats it (unmatched lines are counted on the Connections page).
+    if (outcome.productsCompleted) {
+      try {
+        await linkOrderLines(deps.db, { orgId: job.orgId, connectionId: job.connectionId });
+      } catch {
+        /* retried by the next products run */
+      }
+    }
+    return result;
   } catch (error) {
     if (isDataError(error)) {
       const message = safeMessage((error as { cause?: unknown }).cause ?? error).slice(0, 300);

@@ -7,7 +7,10 @@ import { apiFetch } from '@/lib/api';
 import { loadAppContext } from '@/lib/app-context';
 import {
   describeConnection,
+  describeResources,
   describeSync,
+  describeUnlinked,
+  REFRESH_NOTE,
   connectionsErrorMessage,
   shopifyWarningMessage,
   type ConnectionView,
@@ -98,6 +101,8 @@ export default async function ConnectionsPage({
               {connections.map((c) => {
                 const v = describeConnection(c, now);
                 const s = describeSync(c.sync, c.lastSyncedAt, now, c);
+                const lines = describeResources(c.sync, now);
+                const unlinked = describeUnlinked(c.sync.unlinkedLines);
                 const syncId = `sync-${c.id}`;
                 return (
                   <li
@@ -116,6 +121,29 @@ export default async function ConnectionsPage({
                           {s.headline}
                         </p>
                         {s.detail && <p className="text-muted-foreground">{s.detail}</p>}
+                        {lines.length > 0 && (
+                          <ul
+                            aria-label={`Import status for ${c.shop}`}
+                            className="mt-1 flex flex-col gap-0.5"
+                          >
+                            {lines.map((line) => (
+                              <li
+                                key={line.resource}
+                                title={line.hint}
+                                tabIndex={0}
+                                className={`rounded-sm focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring ${
+                                  line.tone === 'warn'
+                                    ? 'text-destructive'
+                                    : 'text-muted-foreground'
+                                }`}
+                              >
+                                {line.text}
+                                <span className="sr-only"> ({line.hint})</span>
+                              </li>
+                            ))}
+                          </ul>
+                        )}
+                        {unlinked && <p className="text-muted-foreground">{unlinked}</p>}
                       </div>
                     </div>
                     <div className="flex flex-wrap items-center gap-2">
@@ -141,6 +169,9 @@ export default async function ConnectionsPage({
                 );
               })}
             </ul>
+          )}
+          {connections !== null && connections.length > 0 && (
+            <p className="mt-3 text-xs text-muted-foreground">{REFRESH_NOTE}</p>
           )}
         </CardContent>
       </Card>

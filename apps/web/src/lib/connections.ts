@@ -1,4 +1,4 @@
-import type { ConnectionDto, ConnectionSyncDto } from '@erq/shared';
+import type { ConnectionDto, ConnectionResourceDto, ConnectionSyncDto } from '@erq/shared';
 
 const GENERIC_ERROR = 'Something went wrong connecting to Shopify. Please try again.';
 
@@ -54,6 +54,39 @@ export function relativeTime(iso: string | null, now: Date): string {
   const hours = Math.floor(minutes / 60);
   if (hours < 24) return plural(hours, 'hour');
   return plural(Math.floor(hours / 24), 'day');
+}
+
+export interface ResourceLine {
+  resource: string;
+  label: string;
+  hint: string;
+  text: string;
+  tone: 'ok' | 'warn' | 'muted';
+}
+
+const RESOURCE_LABELS_SHORT: Record<string, string> = {
+  locations: 'Locations',
+  products: 'Products',
+  inventory: 'Stock',
+  orders: 'Orders',
+};
+const RESOURCE_HINTS: Record<string, string> = {
+  locations: 'Your warehouses and stores in Shopify.',
+  products: 'Your products, prices and the cost per item you entered in Shopify.',
+  inventory: 'How many units you have at each location.',
+  orders: 'Your sales. Orders refresh about every 15 minutes.',
+};
+
+/** The oldest completion time, only when EVERY resource has finished at least once. */
+export function oldestCompletedAt(resources: ConnectionResourceDto[]): string | null {
+  if (resources.length === 0) return null;
+  let oldest: number | null = null;
+  for (const r of resources) {
+    const t = r.lastCompletedAt ? new Date(r.lastCompletedAt).getTime() : Number.NaN;
+    if (Number.isNaN(t)) return null;
+    oldest = oldest === null ? t : Math.min(oldest, t);
+  }
+  return oldest === null ? null : new Date(oldest).toISOString();
 }
 
 export interface ConnectionView {
@@ -156,6 +189,50 @@ function neverDetail(canSync: boolean, status: ConnectionDto['status'], canStart
     : 'Importing is not available on this server yet.';
 }
 
+const stripEnd = (text: string): string => text.trim().replace(/[.!?]+$/, '');
+
+export function describeResources(sync: ConnectionSyncDto, now: Date): ResourceLine[] {
+  return sync.resources.map((r): ResourceLine => {
+    const label = Object.hasOwn(RESOURCE_LABELS_SHORT, r.resource)
+      ? (RESOURCE_LABELS_SHORT[r.resource] as string)
+      : 'Data';
+    const hint = Object.hasOwn(RESOURCE_HINTS, r.resource)
+      ? (RESOURCE_HINTS[r.resource] as string)
+      : '';
+    const base = { resource: r.resource, label, hint };
+    if (r.state === 'running') return { ...base, text: `${label}: importing now`, tone: 'muted' };
+    if (r.state === 'never') return { ...base, text: `${label}: not imported yet`, tone: 'muted' };
+    if (r.state === 'failed') {
+      const good = r.lastCompletedAt
+        ? ` Last good import ${relativeTime(r.lastCompletedAt, now)}.`
+        : '';
+      return {
+        ...base,
+        text: `${label}: failed, ${stripEnd(r.error ?? 'try Sync now')}.${good}`,
+        tone: 'warn',
+      };
+    }
+    const at = r.lastCompletedAt ? new Date(r.lastCompletedAt).getTime() : Number.NaN;
+    const stale = !Number.isNaN(at) && now.getTime() - at > STALE_AFTER_MS;
+    return {
+      ...base,
+      text: `${label}: last import ${relativeTime(r.lastCompletedAt, now)}`,
+      tone: stale ? 'warn' : 'ok',
+    };
+  });
+}
+
+export const REFRESH_NOTE =
+  'Orders refresh about every 15 minutes. Products and stock levels refresh sooner when Shopify tells us about a change.';
+
+export function describeUnlinked(count: number): string | null {
+  if (!Number.isFinite(count) || count <= 0) return null;
+  if (count === 1) {
+    return '1 order line is waiting for its product to be imported, so its cost is not counted yet.';
+  }
+  return `${count.toLocaleString('en-US')} order lines are waiting for their products to be imported, so their cost is not counted yet.`;
+}
+
 /**
  * Plain-English sync status for one connection. It combines the import state with the
  * connection's own status and error so a broken connection is never shown as up to date.
@@ -169,9 +246,11 @@ export function describeSync(
   const coverage = coverageText(sync);
   const usable = connection.status === 'active' || connection.status === 'error';
   const canSync = sync.canStart && usable;
-  const syncedMs = lastSyncedAt ? new Date(lastSyncedAt).getTime() : Number.NaN;
+  // With per-resource times, "last import" is the OLDEST resource: the headline never claims more than that.
+  const freshness = sync.resources.length > 0 ? oldestCompletedAt(sync.resources) : lastSyncedAt;
+  const syncedMs = freshness ? new Date(freshness).getTime() : Number.NaN;
   const hasSynced = !Number.isNaN(syncedMs);
-  const synced = hasSynced ? `Last synced ${relativeTime(lastSyncedAt, now)}` : 'Not synced yet';
+  const synced = hasSynced ? `Last synced ${relativeTime(freshness, now)}` : 'Not synced yet';
 
   if (connection.status === 'disconnected') {
     return {
@@ -190,7 +269,7 @@ export function describeSync(
     };
   }
   if (sync.state === 'failed') {
-    const lastGood = hasSynced ? `Last successful sync ${relativeTime(lastSyncedAt, now)}` : null;
+    const lastGood = hasSynced ? `Last successful sync ${relativeTime(freshness, now)}` : null;
     return {
       headline: 'Import stopped',
       detail: join(
@@ -223,7 +302,7 @@ export function describeSync(
   }
   const stale = now.getTime() - syncedMs > STALE_AFTER_MS;
   return {
-    headline: `Last import finished ${relativeTime(lastSyncedAt, now)}`,
+    headline: `Last import finished ${relativeTime(freshness, now)}`,
     detail: join(stale ? 'This may be out of date. Try Sync now' : null, coverage),
     tone: stale ? 'warn' : 'ok',
     canSync,

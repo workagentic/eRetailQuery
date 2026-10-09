@@ -1,9 +1,18 @@
 import { describe, expect, it } from 'vitest';
-import { SHOPIFY_ERROR_CODES, type ConnectionDto, type ConnectionSyncDto } from '@erq/shared';
+import {
+  SHOPIFY_ERROR_CODES,
+  type ConnectionDto,
+  type ConnectionResourceDto,
+  type ConnectionSyncDto,
+} from '@erq/shared';
 import {
   connectionsErrorMessage,
   describeConnection,
+  describeResources,
   describeSync,
+  describeUnlinked,
+  oldestCompletedAt,
+  REFRESH_NOTE,
   STALE_AFTER_MS,
   isShopifyAuthorizeUrl,
   shopifyErrorMessage,
@@ -353,5 +362,149 @@ describe('describeSync', () => {
       tone: 'muted',
       canSync: false,
     });
+  });
+});
+
+const ago = (ms: number) => new Date(NOW.getTime() - ms).toISOString();
+const MIN = 60_000;
+const HOUR = 60 * MIN;
+const four = (
+  over: Partial<Record<ConnectionResourceDto['resource'], Partial<ConnectionResourceDto>>> = {},
+): ConnectionResourceDto[] =>
+  (['locations', 'products', 'inventory', 'orders'] as const).map((resource) => ({
+    resource,
+    state: 'idle',
+    lastCompletedAt: ago(5 * MIN),
+    error: null,
+    ...over[resource],
+  }));
+
+describe('oldestCompletedAt', () => {
+  it('is the oldest time, and null when any resource has none', () => {
+    expect(oldestCompletedAt(four({ products: { lastCompletedAt: ago(2 * HOUR) } }))).toBe(
+      ago(2 * HOUR),
+    );
+    expect(
+      oldestCompletedAt(four({ orders: { state: 'never', lastCompletedAt: null } })),
+    ).toBeNull();
+    expect(oldestCompletedAt([])).toBeNull();
+  });
+});
+
+describe('describeResources', () => {
+  const lines = (over: Parameters<typeof four>[0]) =>
+    describeResources(sync({ resources: four(over) }), NOW).map((l) => [l.label, l.text, l.tone]);
+  it('gives every resource its own plain line, in import order', () => {
+    expect(
+      lines({
+        orders: { lastCompletedAt: ago(6 * MIN) },
+        products: { state: 'running' },
+        inventory: { state: 'never', lastCompletedAt: null },
+      }),
+    ).toEqual([
+      ['Locations', 'Locations: last import 5 minutes ago', 'ok'],
+      ['Products', 'Products: importing now', 'muted'],
+      ['Stock', 'Stock: not imported yet', 'muted'],
+      ['Orders', 'Orders: last import 6 minutes ago', 'ok'],
+    ]);
+  });
+  it('names a failed resource with its reason and its last good import', () => {
+    expect(
+      lines({
+        inventory: {
+          state: 'failed',
+          error: 'Shopify rate limit hit.',
+          lastCompletedAt: ago(3 * HOUR),
+        },
+      })[2],
+    ).toEqual([
+      'Stock',
+      'Stock: failed, Shopify rate limit hit. Last good import 3 hours ago.',
+      'warn',
+    ]);
+    expect(lines({ orders: { state: 'failed', error: null, lastCompletedAt: null } })[3]).toEqual([
+      'Orders',
+      'Orders: failed, try Sync now.',
+      'warn',
+    ]);
+  });
+  it('warns when a resource is older than two days and not at exactly two days', () => {
+    expect(lines({ orders: { lastCompletedAt: ago(STALE_AFTER_MS) } })[3]![2]).toBe('ok');
+    expect(lines({ orders: { lastCompletedAt: ago(STALE_AFTER_MS + 1000) } })[3]![2]).toBe('warn');
+  });
+  it('gives every line a hint for its tooltip, and nothing when the server sent no resources', () => {
+    for (const line of describeResources(sync({ resources: four() }), NOW)) {
+      expect(line.hint.length).toBeGreaterThan(10);
+    }
+    expect(describeResources(sync(), NOW)).toEqual([]);
+  });
+});
+
+describe('describeSync with per-resource times', () => {
+  const d = (s: Partial<ConnectionSyncDto>, last: string | null = ago(MIN)) =>
+    describeSync(sync(s), last, NOW, { status: 'active', lastError: null });
+  it('never claims more than the OLDEST resource, whatever the connection time says', () => {
+    const view = d({ resources: four({ products: { lastCompletedAt: ago(2 * HOUR) } }) }, ago(MIN));
+    expect(view).toEqual({
+      headline: 'Last import finished 2 hours ago',
+      detail: null,
+      tone: 'ok',
+      canSync: true,
+    });
+  });
+  it('warns by the oldest resource', () => {
+    const view = d({
+      resources: four({ orders: { lastCompletedAt: ago(STALE_AFTER_MS + 1000) } }),
+    });
+    expect(view).toMatchObject({ headline: 'Last import finished 2 days ago', tone: 'warn' });
+    expect(view.detail).toBe('This may be out of date. Try Sync now.');
+  });
+  it('reads not imported yet when a resource has never been imported, even if the state says idle', () => {
+    expect(
+      d({ resources: four({ orders: { state: 'never', lastCompletedAt: null } }) }).headline,
+    ).toBe('Not imported yet');
+  });
+  it('a failed import keeps its own wording and quotes the oldest good time', () => {
+    const view = d({
+      state: 'failed',
+      resource: 'inventory',
+      error: 'Shopify rate limit hit.',
+      resources: four({
+        inventory: { state: 'failed', error: 'Shopify rate limit hit.' },
+        products: { lastCompletedAt: ago(4 * HOUR) },
+      }),
+    });
+    expect(view.headline).toBe('Import stopped');
+    expect(view.detail).toBe(
+      'Stopped while importing stock levels. Shopify rate limit hit. Last successful sync 4 hours ago.',
+    );
+  });
+  it('an errored connection still shows its own error text', () => {
+    const view = describeSync(sync({ resources: four() }), ago(MIN), NOW, {
+      status: 'error',
+      lastError: 'Shopify no longer accepts this connection. Reconnect the store.',
+    });
+    expect(view.headline).toBe('Not up to date');
+    expect(view.detail).toContain(
+      'Shopify no longer accepts this connection. Reconnect the store.',
+    );
+  });
+});
+
+describe('describeUnlinked and REFRESH_NOTE', () => {
+  it('has exact singular and plural wording and nothing for zero', () => {
+    expect(describeUnlinked(0)).toBeNull();
+    expect(describeUnlinked(1)).toBe(
+      '1 order line is waiting for its product to be imported, so its cost is not counted yet.',
+    );
+    expect(describeUnlinked(1234)).toBe(
+      '1,234 order lines are waiting for their products to be imported, so their cost is not counted yet.',
+    );
+    expect(describeUnlinked(-3)).toBeNull();
+  });
+  it('states the order latency plainly', () => {
+    expect(REFRESH_NOTE).toBe(
+      'Orders refresh about every 15 minutes. Products and stock levels refresh sooner when Shopify tells us about a change.',
+    );
   });
 });

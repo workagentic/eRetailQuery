@@ -203,6 +203,32 @@ describe('createTokenService.ensureFresh', () => {
     await expect(svc.ensureFresh(args)).resolves.toEqual({ accessToken: 'shpat_gen1' });
     expect(calls).toEqual(['shprt_seed', 'shprt_seed']);
   });
+  it('a failing credentials write throws fixed text (no ciphertext, no tokens, no cause) and rolls back', async () => {
+    await env.owner.query(`
+      create or replace function erq_test_fail_cred_write() returns trigger language plpgsql as $$
+      begin raise exception 'forced failure'; end $$;
+      create trigger erq_test_fail_cred_write before update of encrypted_credentials on store_connections
+        for each row execute function erq_test_fail_cred_write();`);
+    try {
+      const { fn } = rotating();
+      const err = (await service(fn)
+        .ensureFresh(args)
+        .catch((e: unknown) => e)) as Error;
+      expect(err).toBeInstanceOf(TransientError);
+      expect(err.message).toBe('Could not store refreshed credentials.');
+      expect(err.cause).toBeUndefined();
+      for (const secret of ['shpat_gen1', 'shprt_gen1', 'shprt_seed', 'shpat_seed', 'params'])
+        expect(err.message).not.toContain(secret);
+    } finally {
+      await env.owner.query(
+        `drop trigger erq_test_fail_cred_write on store_connections; drop function erq_test_fail_cred_write();`,
+      );
+    }
+    expect((await stored()).creds).toMatchObject({
+      accessToken: 'shpat_seed',
+      refreshToken: 'shprt_seed',
+    });
+  });
   it('a final refusal throws the fixed reconnect text and changes nothing', async () => {
     const refresh: RefreshFn = async () => {
       throw new AuthError(SHOPIFY_RECONNECT_MESSAGE);

@@ -127,18 +127,24 @@ export function createTokenService(deps: TokenServiceDeps): TokenService {
         const grant = await deps.refresh({ shop: row.shop, refreshToken: locked.refreshToken });
         const next = credentialsFromGrant(grant, at);
         const expiry = credentialExpiry(next);
-        await tx
-          .update(storeConnections)
-          .set({
-            encryptedCredentials: encryptConnectionCredentials(
-              next,
-              deps.keyProvider,
-              connectionId,
-            ),
-            accessTokenExpiresAt: expiry.accessTokenExpiresAt,
-            refreshTokenExpiresAt: expiry.refreshTokenExpiresAt,
-          })
-          .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, connectionId)));
+        try {
+          await tx
+            .update(storeConnections)
+            .set({
+              encryptedCredentials: encryptConnectionCredentials(
+                next,
+                deps.keyProvider,
+                connectionId,
+              ),
+              accessTokenExpiresAt: expiry.accessTokenExpiresAt,
+              refreshTokenExpiresAt: expiry.refreshTokenExpiresAt,
+            })
+            .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, connectionId)));
+        } catch {
+          // The driver's error text embeds the bound parameters (the new ciphertext), and this message ends up in
+          // cursor last_error, sync_runs.error and logs. Throw fixed text with no cause. The transaction rolls back.
+          throw new TransientError('Could not store refreshed credentials.');
+        }
         return { accessToken: next.accessToken };
       });
     },

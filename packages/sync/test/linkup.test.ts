@@ -73,14 +73,15 @@ const args = { orgId: ORG_A, connectionId: CONN_A };
 describe('linkOrderLines', () => {
   it('links the line and fills the cost in effect on the ORDER date in the org timezone', async () => {
     const sku = await seedSku(env.owner, ORG_A, 'LATE');
-    await seedCost(env.owner, ORG_A, sku, 700, { from: '2026-01-01', to: '2026-02-28' });
-    await seedCost(env.owner, ORG_A, sku, 900, { from: '2026-03-01' });
+    await seedCost(env.owner, ORG_A, sku, 700, { from: '2026-01-01', to: '2026-03-02' });
+    await seedCost(env.owner, ORG_A, sku, 900, { from: '2026-03-02' });
     await seedListing(env.owner, ORG_A, CONN_A, sku, 'v-9');
-    // 03:30 UTC on 2 March is still 1 March in New York (org A): the 900 cost applies, and today's cost never does.
+    // (effective_to is exclusive, so 700 covers through 1 March.) 03:30 UTC on 2 March is still 1 March in New York (org A): the 700 cost applies (in UTC it would be 900),
+    // and today's cost never does.
     const march = await orderWithLines(ORG_A, CONN_A, 'o-march', '2026-03-02T03:30:00Z', ['v-9']);
     const february = await orderWithLines(ORG_A, CONN_A, 'o-feb', '2026-02-10T15:00:00Z', ['v-9']);
     expect(await linkOrderLines(env.db, args)).toEqual({ linked: 2 });
-    expect(await line(march)).toEqual([{ sku_id: sku, cogs: '900' }]);
+    expect(await line(march)).toEqual([{ sku_id: sku, cogs: '700' }]);
     expect(await line(february)).toEqual([{ sku_id: sku, cogs: '700' }]);
   });
   it('is idempotent, and a later cost change never rewrites a snapshot', async () => {
@@ -131,10 +132,12 @@ describe('linkOrderLines', () => {
     const skuB = await seedSku(env.owner, ORG_B, 'B');
     await seedListing(env.owner, ORG_A, CONN_A, skuA, 'v-shared');
     await seedListing(env.owner, ORG_B, CONN_B, skuB, 'v-shared');
+    const skuA2 = await seedSku(env.owner, ORG_A, 'A2');
+    await seedListing(env.owner, ORG_A, CONN_A2, skuA2, 'v-shared'); // the sibling HAS a matching listing
     const mine = await orderWithLines(ORG_A, CONN_A, 'o-a', '2026-03-05T12:00:00Z', ['v-shared']);
     const sibling = await orderWithLines(ORG_A, CONN_A2, 'o-a2', '2026-03-05T12:00:00Z', [
       'v-shared',
-    ]); // no listing on CONN_A2
+    ]); // linkable, but on another connection: this run must not touch it
     const theirs = await orderWithLines(ORG_B, CONN_B, 'o-b', '2026-03-05T12:00:00Z', ['v-shared']);
     expect(await linkOrderLines(env.db, args)).toEqual({ linked: 1 });
     expect((await line(mine))[0]!.sku_id).toBe(skuA);

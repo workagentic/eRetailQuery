@@ -666,8 +666,10 @@ async function resolveAlerts(tx: Tx, orgId: string, connectionId: string): Promi
 
 /**
  * A reconnect makes any pending `app/uninstalled` event of the connection stale: retried later, it would
- * disconnect the reinstalled shop and wipe its new tokens. The worker locks the event row and stops unless it is
- * still `processing`, so this update and an in-flight uninstall serialize.
+ * disconnect the reinstalled shop and wipe its new tokens. The worker stops unless the event is still `processing`,
+ * so this update and an in-flight uninstall serialize. Lock order, the same as the worker's uninstall
+ * (apps/worker/src/webhooks/handler.ts): the store_connections row first (taken here by the upsert earlier in this
+ * transaction), then the webhook_events rows. Never call this before the connection row is locked.
  */
 async function retirePendingUninstalls(tx: Tx, orgId: string, connectionId: string): Promise<void> {
   await tx

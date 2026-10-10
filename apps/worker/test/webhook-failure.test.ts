@@ -248,3 +248,51 @@ describe('a later success', () => {
     expect(rows[0].resolved_at).not.toBeNull();
   });
 });
+
+describe('lock order between a reconnect and an uninstall', () => {
+  it('a reconnect holding the connection row and an uninstall run never deadlock: the uninstall waits, then skips', async () => {
+    const id = await addEvent('app/uninstalled', { status: 'failed', minutesOld: 30 });
+    const reconnect = await owner.connect();
+    try {
+      // The reconnect transaction (apps/api completeInstall): the upsert locks the connection row first...
+      await reconnect.query('begin');
+      const { rows } = await reconnect.query<{ pid: number }>('select pg_backend_pid() as pid');
+      await reconnect.query(
+        `insert into store_connections (org_id, platform, external_account_id, status) values ($1, 'shopify', 'main.myshopify.com', 'active')
+         on conflict (org_id, platform, external_account_id) do update set status = 'active', updated_at = now()`,
+        [ORG],
+      );
+      // ...while the uninstall run starts and must block on that row before it locks its event row.
+      const handler = run(id);
+      const deadline = Date.now() + 15_000;
+      for (;;) {
+        const waiting = await owner.query(
+          `select count(*)::int as n from pg_stat_activity where wait_event_type = 'Lock' and pid <> $1 and datname = current_database()`,
+          [rows[0]!.pid],
+        );
+        if (waiting.rows[0].n > 0) break;
+        if (Date.now() > deadline)
+          throw new Error('the uninstall run never waited on the connection row');
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      // ...then the reconnect retires the event. With the inverted order this statement would deadlock.
+      await reconnect.query(
+        `update webhook_events set status = 'ignored', updated_at = now() where id = $1 and status in ('received', 'failed', 'processing')`,
+        [id],
+      );
+      await reconnect.query('commit');
+      expect(await handler).toBe('skipped');
+    } finally {
+      await reconnect.query('rollback').catch(() => undefined);
+      reconnect.release();
+    }
+    const conn = (
+      await owner.query(
+        `select status, encrypted_credentials from store_connections where id = $1`,
+        [ORG],
+      )
+    ).rows[0];
+    expect(conn).toEqual({ status: 'active', encrypted_credentials: 'ciphertext' });
+    expect((await event(id)).status).toBe('ignored');
+  }, 30_000);
+});

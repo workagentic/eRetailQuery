@@ -185,9 +185,16 @@ export async function processWebhookEvent(
     return await deps.db.withTenant(orgId, async (tx) => {
       const at = now();
       if (topic === 'app/uninstalled') {
-        // A reconnect retires pending uninstall events in its own transaction. Locking the event row serializes
-        // against it: if the event is no longer ours (`processing`), the shop was reinstalled since, so a stale
-        // uninstall must not disconnect it and wipe the new tokens.
+        // A reconnect retires pending uninstall events in its own transaction. Lock order, the same as the reconnect
+        // in apps/api connections.service (upsert of the connection row, then retirePendingUninstalls): the
+        // store_connections row first (FOR NO KEY UPDATE), then the webhook_events row. If the event is no longer
+        // ours (`processing`), the shop was reinstalled since, so a stale uninstall must not disconnect it and wipe
+        // the new tokens.
+        await tx
+          .select({ id: storeConnections.id })
+          .from(storeConnections)
+          .where(and(eq(storeConnections.orgId, orgId), eq(storeConnections.id, storeConnectionId)))
+          .for('no key update');
         const [current] = await tx
           .select({ status: webhookEvents.status })
           .from(webhookEvents)

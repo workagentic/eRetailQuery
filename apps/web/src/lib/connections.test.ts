@@ -14,6 +14,7 @@ import {
   describeUnlinked,
   oldestCompletedAt,
   REFRESH_NOTE,
+  INVENTORY_STALE_AFTER_MS,
   STALE_AFTER_MS,
   isShopifyAuthorizeUrl,
   shopifyErrorMessage,
@@ -256,17 +257,17 @@ describe('describeSync', () => {
     expect(d({ state: 'idle', canStart: false }, FIVE_MIN_AGO).canSync).toBe(false);
   });
 
-  it('warns when the last import is more than two days old, and not at exactly two days', () => {
-    expect(STALE_AFTER_MS).toBe(2 * 24 * 60 * 60 * 1000);
+  it('warns when the single last-import time is over an hour old, and not at exactly an hour', () => {
+    expect(STALE_AFTER_MS).toBe(60 * 60 * 1000);
     const exactly = new Date(NOW.getTime() - STALE_AFTER_MS).toISOString();
     const justOver = new Date(NOW.getTime() - STALE_AFTER_MS - 1000).toISOString();
     expect(d({ state: 'idle' }, exactly)).toMatchObject({
-      headline: 'Last import finished 2 days ago',
+      headline: 'Last import finished 1 hour ago',
       detail: null,
       tone: 'ok',
     });
     expect(d({ state: 'idle' }, justOver)).toEqual({
-      headline: 'Last import finished 2 days ago',
+      headline: 'Last import finished 1 hour ago',
       detail: 'This may be out of date. Try Sync now.',
       tone: 'warn',
       canSync: true,
@@ -430,9 +431,32 @@ describe('describeResources', () => {
       'warn',
     ]);
   });
-  it('warns when a resource is older than two days and not at exactly two days', () => {
-    expect(lines({ orders: { lastCompletedAt: ago(STALE_AFTER_MS) } })[3]![2]).toBe('ok');
-    expect(lines({ orders: { lastCompletedAt: ago(STALE_AFTER_MS + 1000) } })[3]![2]).toBe('warn');
+  it('warns, with words as well as tone, when locations, products or orders are over an hour old', () => {
+    for (const [i, name] of [
+      [0, 'locations'],
+      [1, 'products'],
+      [3, 'orders'],
+    ] as const) {
+      const fresh = lines({ [name]: { lastCompletedAt: ago(STALE_AFTER_MS) } })[i]!;
+      expect(fresh[1]).not.toContain('out of date');
+      expect(fresh[2]).toBe('ok');
+      expect(lines({ [name]: { lastCompletedAt: ago(STALE_AFTER_MS - 1000) } })[i]![2]).toBe('ok');
+      const stale = lines({ [name]: { lastCompletedAt: ago(STALE_AFTER_MS + 1000) } })[i]!;
+      expect(stale[2]).toBe('warn');
+      expect(stale[1]).toContain('may be out of date');
+    }
+  });
+  it('gives stock four hours, because it polls hourly', () => {
+    expect(INVENTORY_STALE_AFTER_MS).toBe(4 * 60 * 60 * 1000);
+    expect(lines({ inventory: { lastCompletedAt: ago(2 * HOUR) } })[2]![2]).toBe('ok');
+    expect(lines({ inventory: { lastCompletedAt: ago(INVENTORY_STALE_AFTER_MS) } })[2]![2]).toBe(
+      'ok',
+    );
+    const stale = lines({
+      inventory: { lastCompletedAt: ago(INVENTORY_STALE_AFTER_MS + 1000) },
+    })[2]!;
+    expect(stale[2]).toBe('warn');
+    expect(stale[1]).toContain('may be out of date');
   });
   it('gives every line a hint for its tooltip, and nothing when the server sent no resources', () => {
     for (const line of describeResources(sync({ resources: four() }), NOW)) {
@@ -446,7 +470,10 @@ describe('describeSync with per-resource times', () => {
   const d = (s: Partial<ConnectionSyncDto>, last: string | null = ago(MIN)) =>
     describeSync(sync(s), last, NOW, { status: 'active', lastError: null });
   it('never claims more than the OLDEST resource, whatever the connection time says', () => {
-    const view = d({ resources: four({ products: { lastCompletedAt: ago(2 * HOUR) } }) }, ago(MIN));
+    const view = d(
+      { resources: four({ inventory: { lastCompletedAt: ago(2 * HOUR) } }) },
+      ago(MIN),
+    );
     expect(view).toEqual({
       headline: 'Last import finished 2 hours ago',
       detail: null,
@@ -454,12 +481,21 @@ describe('describeSync with per-resource times', () => {
       canSync: true,
     });
   });
-  it('warns by the oldest resource', () => {
+  it('warns when ANY resource is stale, by its own threshold', () => {
     const view = d({
       resources: four({ orders: { lastCompletedAt: ago(STALE_AFTER_MS + 1000) } }),
     });
-    expect(view).toMatchObject({ headline: 'Last import finished 2 days ago', tone: 'warn' });
+    expect(view).toMatchObject({ headline: 'Last import finished 1 hour ago', tone: 'warn' });
     expect(view.detail).toBe('This may be out of date. Try Sync now.');
+    // Stock at 3 hours is fine for stock, so the headline stays green even though it is the oldest.
+    expect(d({ resources: four({ inventory: { lastCompletedAt: ago(3 * HOUR) } }) }).tone).toBe(
+      'ok',
+    );
+    expect(
+      d({
+        resources: four({ inventory: { lastCompletedAt: ago(INVENTORY_STALE_AFTER_MS + 1000) } }),
+      }).tone,
+    ).toBe('warn');
   });
   it('reads not imported yet when a resource has never been imported, even if the state says idle', () => {
     expect(

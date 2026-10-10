@@ -174,8 +174,26 @@ function coverageText(sync: ConnectionSyncDto): string | null {
   return parts.length > 0 ? parts.join(' ') : null;
 }
 
-/** An import older than this is shown as a warning, not as fresh. */
-export const STALE_AFTER_MS = 2 * 24 * 60 * 60 * 1000;
+const HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * A resource whose last import is older than this is shown as a warning, not as fresh. About 4x the polling
+ * cadence, so a dead scheduler is noticed within hours, not days. Mirrors SYNC_CADENCE_MS in packages/sync
+ * (locations, products and orders poll every 15 minutes, inventory every 60 minutes); kept local because the
+ * web app must not import server-only code. Change both together.
+ */
+export const STALE_AFTER_MS = HOUR_MS; // 4 x 15 minutes
+/** Inventory polls hourly, so it gets 4 x 60 minutes. */
+export const INVENTORY_STALE_AFTER_MS = 4 * HOUR_MS;
+
+const staleAfterMs = (resource: string): number =>
+  resource === 'inventory' ? INVENTORY_STALE_AFTER_MS : STALE_AFTER_MS;
+
+function isResourceStale(r: ConnectionSyncDto['resources'][number], now: Date): boolean {
+  if (r.state === 'running' || r.state === 'never' || r.state === 'failed') return false;
+  const at = r.lastCompletedAt ? new Date(r.lastCompletedAt).getTime() : Number.NaN;
+  return !Number.isNaN(at) && now.getTime() - at > staleAfterMs(r.resource);
+}
 
 const sentence = (text: string): string =>
   /[.!?]$/.test(text.trim()) ? text.trim() : `${text.trim()}.`;
@@ -217,11 +235,10 @@ export function describeResources(sync: ConnectionSyncDto, now: Date): ResourceL
         tone: 'warn',
       };
     }
-    const at = r.lastCompletedAt ? new Date(r.lastCompletedAt).getTime() : Number.NaN;
-    const stale = !Number.isNaN(at) && now.getTime() - at > STALE_AFTER_MS;
+    const stale = isResourceStale(r, now);
     return {
       ...base,
-      text: `${label}: last import ${relativeTime(r.lastCompletedAt, now)}`,
+      text: `${label}: last import ${relativeTime(r.lastCompletedAt, now)}${stale ? ', may be out of date' : ''}`,
       tone: stale ? 'warn' : 'ok',
     };
   });
@@ -305,7 +322,11 @@ export function describeSync(
       canSync,
     };
   }
-  const stale = now.getTime() - syncedMs > STALE_AFTER_MS;
+  // Any stale resource makes the headline warn; without per-resource times, judge the single timestamp.
+  const stale =
+    sync.resources.length > 0
+      ? sync.resources.some((r) => isResourceStale(r, now))
+      : now.getTime() - syncedMs > STALE_AFTER_MS;
   return {
     headline: `Last import finished ${relativeTime(freshness, now)}`,
     detail: join(stale ? 'This may be out of date. Try Sync now' : null, coverage),

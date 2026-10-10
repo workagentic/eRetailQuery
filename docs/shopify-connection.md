@@ -50,7 +50,7 @@ Create an app in the Shopify Partner organisation (Dev Dashboard) and put these 
 | Compliance webhooks `customers/data_request`, `customers/redact`, `shop/redact` with URI `${API_PUBLIC_URL}/webhooks/shopify` (`API_PUBLIC_URL` is still needed for the webhook URL) | App configuration (`[[webhooks.subscriptions]]` with `compliance_topics` in `shopify.app.toml`). The same endpoint also receives the per-shop `app/uninstalled` subscription the callback registers. |
 | Scopes | App configuration must include the scopes in `SHOPIFY_SCOPES` (default `read_products,read_inventory,read_locations,read_orders,read_all_orders`, comma separated). `read_all_orders` may need Shopify's approval; without it the order history is limited to 60 days (section 9.2). |
 
-Protected customer data access is a separate approval in the Partner dashboard and is **not** requested (1b-2 and 1b-3b): no customer scopes are asked for and no customer PII is stored. For the same reason 1b-2 subscribes each shop to `app/uninstalled` only (`SHOPIFY_WEBHOOK_TOPICS`); the order, refund, product and stock topics (`SHOPIFY_FUTURE_DATA_WEBHOOK_TOPICS`) carry customer data, likely need that approval, and are subscribed in 1b-3 together with their consumption.
+Protected customer data access is a separate approval in the Partner dashboard and is **not** requested (1b-2 and 1b-3b): no customer scopes are asked for and no customer PII is stored. For the same reason each shop is subscribed only to `app/uninstalled`, `products/update` and `inventory_levels/update` (`SHOPIFY_WEBHOOK_TOPICS`; the last two carry no customer data and only nudge a sync). The order and refund topics carry customer data, need that approval, and stay unsubscribed (orders are polled).
 
 The endpoint must use HTTPS with a valid certificate and answer 401 on a bad HMAC (it does).
 
@@ -65,8 +65,8 @@ Could not confirm: where exactly in the current Dev Dashboard UI the redirect UR
 
 | Name | Read by | Required | Effect when missing |
 |---|---|---|---|
-| `API_PUBLIC_URL` | API | optional | Shopify is disabled (config is null). Public base URL of the API, used for the webhook URL. |
-| `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET` | API | optional | Shopify disabled. |
+| `API_PUBLIC_URL` | API, worker | optional | API: Shopify is disabled (config is null). Public base URL of the API, used for the webhook URL. Worker: the webhook callback for the daily re-registration; without it nothing is re-registered. |
+| `SHOPIFY_API_KEY`, `SHOPIFY_API_SECRET` | API, worker | optional | API: Shopify disabled. Worker (token refresh): an expiring token that needs refreshing fails the run with "Token refresh is not configured on this server." |
 | `SHOPIFY_SCOPES` | API | optional | Defaults to the five read scopes above. |
 | `ENCRYPTION_KEY_ID`, `ENCRYPTION_KEY` | API | optional | No key provider: install and callback return `not_configured` or 503. Webhook receiving needs only the Shopify config. |
 | `ENCRYPTION_OLD_KEYS` | API | optional | Retired keys are not available for decrypting old ciphertext. |
@@ -122,7 +122,8 @@ Token exchange: the request to `https://<shop>/admin/oauth/access_token` is sent
   - `app/uninstalled`: connection set to `disconnected`, token wiped, audit `connection.uninstalled`, event `processed`.
   - `customers/data_request`, `customers/redact`: we hold no customer PII, so an audit row `privacy.request_recorded` (topic only, never the payload) is written and the event is `processed`.
   - `shop/redact`: looks up the event's connection and calls `app_purge_shop(platform, shop)` (section 7), which purges every disconnected or errored connection of the shop in every org. The event row normally goes with the cascade; if an active reinstall owns the shop, the event is closed as `processed`.
-  - `orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`, `products/create|update|delete`, `inventory_levels/update`: not subscribed in 1b-2. If one arrives anyway it is marked `deferred`. The stored payload is `{}` already, because the receiver never stores a body.
+  - `products/update`, `inventory_levels/update` (subscribed since 1b-3c): only nudge a sync (`apps/worker/src/webhooks/nudge.ts`, debounced in the database, see docs/sync.md "Live updates"); the payload is `{}`, the event becomes `processed`.
+  - `orders/create`, `orders/updated`, `orders/cancelled`, `refunds/create`, `products/create|delete`: not subscribed. If one arrives anyway it is marked `deferred`. The stored payload is `{}` already, because the receiver never stores a body.
   - Anything else: `ignored`.
 - **Claim and reclaim:** the claim (`received` or `failed` to `processing`) commits before the work, so a `shop/redact` purge, whose cascade deletes the event row, never waits on our own row lock. A `processing` event whose `updated_at` is older than `STALE_EVENT_MS` (10 minutes) can be claimed again by another worker.
 - **Stale-event sweep:** every 5 minutes (`scheduleWebhookSweep`) the worker calls `app_list_stale_webhook_events`, which returns `received` events older than the cutoff, `processing` events whose `updated_at` is older than the cutoff (migration 0016), and `failed` events of the privacy topics `customers/data_request`, `customers/redact` and `shop/redact` whose last attempt (`updated_at`) is older than the cutoff (migration 0021), and re-enqueues them. A failed privacy event is therefore retried with a fresh set of 5 attempts every 10 to 15 minutes until it succeeds; a failed event of any other topic is never retried. Each sweep window uses a time-bucketed job id suffix (`_r<bucket>`) so a retained finished job never swallows the retry; double processing is safe because the claim is atomic.
@@ -131,7 +132,7 @@ Token exchange: the request to `https://<shop>/admin/oauth/access_token` is sent
 
 ## 6. Credentials
 
-The token is stored in `store_connections.encrypted_credentials` as AES-256-GCM encrypted JSON `{ "accessToken": string }` with AAD `connection:<id>`, written by `encryptConnectionCredentials`. 1b-3 reads it with `decryptConnectionCredentials`. Disconnect and uninstall set the column to null. The token, secrets, state nonce and payloads are never logged or put in job data, `last_error` or audit metadata; stored error text goes through `sanitizeMessage`.
+The tokens are stored in `store_connections.encrypted_credentials` as AES-256-GCM encrypted JSON with AAD `connection:<id>`, written by `encryptConnectionCredentials`. For expiring tokens (1b-3c) the blob is `{ accessToken, accessTokenExpiresAt, refreshToken, refreshTokenExpiresAt }`; the old `{ accessToken }` shape is read as non-expiring and never refreshed. The two expiry times are mirrored in `store_connections.access_token_expires_at` and `refresh_token_expires_at` (so the scheduler can find idle connections without decrypting). The install sends `expiring=1`. A refresh rotates both tokens and is serialised by the connection row lock (`createTokenService`, docs/sync.md "Token service"); a final `401` marks the connection `error` with "Shopify no longer accepts this connection. Reconnect the store." The connector only ever receives `{ accessToken }`. The sync reads the blob with `decryptConnectionCredentials`. Disconnect and uninstall set the column to null. The token, secrets, state nonce and payloads are never logged or put in job data, `last_error` or audit metadata; stored error text goes through `sanitizeMessage`.
 
 ## 7. Privacy and data removal
 
@@ -151,12 +152,11 @@ Held: connection metadata (shop domain, scopes, status, errors), encrypted token
 ### Open items
 
 - **OAuth signature form.** Both the encoded and decoded signed forms are accepted (section 4); verify on the first real install and drop one.
-- **Failed events: privacy topics are swept, nothing alerts.** Since migration 0021 the sweep re-lists `failed` events of `customers/data_request`, `customers/redact` and `shop/redact` once their last attempt is older than 10 minutes, so a mandatory erasure is retried until it succeeds (tested against Postgres; the BullMQ path is unverified without Redis). Not covered: a privacy event that keeps failing is retried forever with no alert or escalation (its sanitized `error` column is the only trace); failed events of other topics (`app/uninstalled`, data topics) stay terminal and are never retried or alerted on; an event the API never stored (for example a database outage during receipt) relies on Shopify's own redelivery.
+- **Failed events.** Since migration 0021 the sweep re-lists `failed` events of `customers/data_request`, `customers/redact` and `shop/redact` once their last attempt is older than 10 minutes, so a mandatory erasure is retried until it succeeds (tested against Postgres; the BullMQ path is unverified without Redis). Since 1b-3c failed `app/uninstalled`, `products/update` and `inventory_levels/update` events are retried 5 times (`sweep_retries`) and then raise an `alerts` row shown on the Connections page (docs/sync.md "Failed webhook events"). Not covered: a privacy event that keeps failing is retried forever with no alert (its sanitized `error` column is the only trace); a final retry that never executes leaves no alert; failed events of other topics stay terminal; an event the API never stored (for example a database outage during receipt) relies on Shopify's own redelivery.
 - **A lost `app/uninstalled` leaves the connection active.** If `app/uninstalled` exhausts its retries, the connection stays `active`, so a later `shop/redact` purges nothing (`app_purge_shop` never touches an active connection). The worker then still closes the event as `processed` but writes the audit row `privacy.shop_redact_skipped` (topic and purged count only) on the event's connection; treat that row as a mandatory erasure request that needs manual follow-up. The same row is written when the event's own connection survives the purge (an active reinstall owns the shop). When another org's disconnected row is the one purged, the `shop/redact` event itself lands in the active org's `webhook_events` (topic and ids only, no payload).
 - **Shared database role.** The API and the worker share the `app_user` role, which can execute `app_purge_store_connection` and `app_purge_shop`. Consider a separate worker role later.
 
 - **Nothing has run against real Shopify.** All behaviour is verified against `fake-shopify` and `signing` test helpers only.
-- **Expiring offline tokens (refresh deferred to 1b-3c).** Shopify can issue expiring offline access tokens plus a refresh token to new public apps (the `expiring=1` flow). 1b-2 stores only `{ accessToken }`, does not request expiring tokens and has no refresh. If Shopify issues an expiring token anyway, syncs will fail with an auth error after expiry until refresh exists.
 - **Webhook subscription GraphQL not verified.** The `webhookSubscriptionCreate` mutation (`URL!` variable type, `format: JSON`, topic enum names derived as `ORDERS_CREATE` and so on) was not independently verified against the live docs. Check it against a real shop (section 10).
 - **Callback edges.** A 401 from the API for a user whose web session still looks valid (for example an expired access token) bounces the user to the dashboard and loses the callback; the user restarts the connection. The web callback route sets `Referrer-Policy: no-referrer` on its redirects, because the query carries the code, state and signature.
 - No reconnect reminder emails.
@@ -179,7 +179,7 @@ The connector (`packages/connectors/src/shopify`) fetches one page per call thro
 
 Deliberately left out: customers, UTM fields and the landing site. They are protected customer data, which needs Shopify's approval and is not requested, so `customerExternalId`, `utm*` and `landingSite` are always null. The connector never queries a customer field.
 
-Only `app/uninstalled` is subscribed as a webhook. The connector has `updated_at` incremental filters for products and orders; inventory always takes a full pass (section 9.7). Sync now runs an incremental run once every resource has completed a backfill, but nothing schedules incrementals automatically yet (1b-3c).
+Subscribed webhooks (1b-3c): `app/uninstalled`, `products/update` and `inventory_levels/update` (the last two only nudge a sync). The connector has `updated_at` incremental filters for products and orders; inventory always takes a full pass (section 9.7). Since 1b-3c a one-minute scheduler runs incremental syncs on a tiered cadence (docs/sync.md "Live updates"); Sync now still starts a run on demand.
 
 ### 9.2 Scopes and order history
 
@@ -252,7 +252,7 @@ Shopify money is a decimal string. The connector converts it with exact string m
   - When a refund has lines, its amount is the sum of the line subtotals, so an order-level manual refund adjustment in the same refund is dropped.
   - Several refund lines for the same order line in one refund (for example restocks at two locations) are summed into one row per line.
   - A cancelled order without a refund keeps its net sales; whether cancelled orders count toward revenue is a decision for 1d (P&L).
-- **Late-linked order lines:** an order line whose variant was unknown keeps a null cost snapshot until the order re-syncs (no link-up pass yet).
+- **Late-linked order lines:** since 1b-3c a link-up pass after each products run links them and fills the cost snapshot; a line whose SKU has no cost yet keeps a null snapshot until `repriceOrderLines` runs (docs/sync.md).
 - **Unknown values:** an unknown product status maps to `draft`; an unknown order source maps to `shopify_online`.
 - **Shipping versus discounts:** whether a free-shipping discount is subtracted twice (`totalDiscountsSet` and `totalShippingPriceSet`) is unverified.
 
@@ -269,8 +269,17 @@ Nothing in 1b-3b has run against a real Shopify shop. On the first install check
 7. **`unitCost`:** whether reading `inventoryItem.unitCost` needs `read_inventory` or `read_products`, and what a shop without that permission returns (any GraphQL error fails the page).
 8. **`read_all_orders`:** whether the app is granted it, and that the stored granted scopes drive the 365-day versus 60-day window.
 9. **Tax-inclusive shop and free-shipping discount** behavior (section 9.7).
-10. **Webhook subscription GraphQL** (`app/uninstalled`) and expiring offline tokens (section 8).
+10. **Webhook subscription GraphQL** (`webhookSubscriptionCreate`, `URL!` variable, `format: JSON`), now used three times per connect (`app/uninstalled`, `products/update`, `inventory_levels/update`) and again by the daily re-registration.
 11. **Reconnect** re-running a full backfill, and the 5-second wait for the first job in the callback.
+12. **Expiring token exchange:** the `expiring=1` answer (`expires_in`, `refresh_token`, `refresh_token_expires_in`).
+13. **Token refresh:** the refresh request and its rotation, and that a replayed refresh token gives `401 {"error":"invalid_request"}`.
+14. **Product and stock subscriptions:** that `products/update` and `inventory_levels/update` are accepted without protected customer data approval and that their delivery nudges a sync within seconds.
+15. **Polling cost:** the real query cost of the 15-minute polling against the 1000-point bucket with several shops (`extensions.cost.actualQueryCost`).
+16. **Scheduler:** that the BullMQ job scheduler `sync-tick` runs exactly one tick per minute across worker restarts and several worker instances.
+17. **Nudge and sweep through real BullMQ** (Redis was not available in development).
+18. **Pool pressure:** that the connection row lock held across the Shopify refresh call does not exhaust the Postgres pool under load (it is `FOR NO KEY UPDATE` with a 5 s lock timeout and 30 s statement timeout).
+19. **Inventory event volume:** the real volume of `inventory_levels/update` events on a busy shop against the 10-minute inventory nudge debounce (does the hourly poll plus nudges stay within the 1000-point bucket).
+20. **Other unverified 1b-3c items:** the Connections page (per-resource lines, alerts, Reconnect) in a browser, and the Playwright e2e (not run: no Docker or Redis).
 
 Connecting a development store end to end:
 

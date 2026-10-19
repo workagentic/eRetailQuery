@@ -20,6 +20,8 @@ export interface ProductRow {
   pricingStatus: 'underpriced' | 'healthy' | 'premium' | 'no_cost';
   /** The markup looks fine but each sale loses money after fees and shipping. */
   contributionNegative: boolean;
+  /** What one unit sold alone earns after cost of goods, fees and fulfillment at the current price; null without a cost. */
+  contributionCents: number | null;
   unitsSold: number;
   revenueCents: number;
   /** Revenue minus cost of goods minus allocated fees; null when the SKU has no cost. Refunds are not netted out here. */
@@ -128,6 +130,7 @@ export async function getProducts(
       idealHighCents: pricing.idealRange?.high.cents ?? null,
       pricingStatus: code,
       contributionNegative: hasCost && pricing.contribution.cents < 0,
+      contributionCents: hasCost ? pricing.contribution.cents : null,
       unitsSold: num(sale?.units),
       revenueCents: revenue,
       profitCents: profit,

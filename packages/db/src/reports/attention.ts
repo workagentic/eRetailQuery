@@ -48,12 +48,13 @@ export async function getAttention(
   }
 
   const all = await getProducts(tx, { range: p.range, channel: 'all', asOf: p.asOf });
-  for (const s of all.filter((x) => x.pricingStatus === 'underpriced' && x.unitsSold > 0)) {
+  const underpriced = all.filter((x) => x.pricingStatus === 'underpriced' && x.unitsSold > 0);
+  for (const s of underpriced) {
     const stake = Math.max(0, (s.idealLowCents ?? s.priceCents) - s.priceCents) * s.unitsSold;
     items.push({
       kind: 'underpriced',
       severity: severityFor(stake),
-      title: `${s.title} is underpriced`,
+      title: `${s.title} (${s.skuCode}) is underpriced`,
       why: `${s.message} It sold ${s.unitsSold} units at this price in the period.`,
       action: `Raise the price to at least ${usd(s.idealLowCents ?? s.priceCents)}.`,
       href: '/products',
@@ -62,14 +63,24 @@ export async function getAttention(
   }
 
   const amazon = await getProducts(tx, { range: p.range, channel: 'amazon', asOf: p.asOf });
-  for (const s of amazon.filter((x) => x.contributionNegative && x.unitsSold > 0)) {
-    const stake = Math.max(0, -(s.profitCents ?? 0));
+  // A SKU already listed as underpriced is not reported twice; its low price is the cause.
+  const listed = new Set(underpriced.map((x) => x.skuId));
+  const losers = amazon
+    .filter((x) => x.contributionNegative && x.unitsSold > 0 && !listed.has(x.skuId))
+    .map((x) => ({ ...x, stake: Math.max(0, -(x.contributionCents ?? 0)) * x.unitsSold }))
+    .sort((x, y) => y.stake - x.stake);
+  if (losers.length > 0) {
+    const stake = losers.reduce((a, x) => a + x.stake, 0);
+    const names = losers
+      .slice(0, 3)
+      .map((x) => `${x.title} (${x.skuCode}) loses ${usd(-(x.contributionCents ?? 0))} a unit`)
+      .join(', ');
     items.push({
       kind: 'amazon_loss',
       severity: severityFor(stake),
-      title: `${s.title} loses money on Amazon`,
-      why: 'After Amazon fees and fulfillment, each sale costs more than it earns.',
-      action: 'Raise the Amazon price, or stop selling it there.',
+      title: `${losers.length} ${losers.length === 1 ? 'product loses' : 'products lose'} money on Amazon`,
+      why: `After Amazon fees and fulfillment, each sale costs more than it earns: ${names}.`,
+      action: 'Raise the Amazon price, or stop selling these there.',
       href: '/products?channel=amazon',
       stakeCents: stake,
     });

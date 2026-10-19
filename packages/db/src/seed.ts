@@ -2,7 +2,7 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { eq } from 'drizzle-orm';
 import { Pool } from 'pg';
 import * as s from './schema';
-import { applyStory, generateDemoData, type SeedSku } from './demo-data';
+import { DEMO_STORY, applyStory, generateDemoData, type SeedSku } from './demo-data';
 
 export const DEMO_ORG_ID = '00000000-0000-4000-8000-000000000001';
 export const DEMO_STORE_IDS = {
@@ -29,6 +29,17 @@ function rng(seed: number): () => number {
 }
 
 const CATEGORIES = ['Apparel', 'Home', 'Beauty', 'Outdoor', 'Kitchen', 'Pets', 'Fitness', 'Toys'];
+// Five product names per category (product p is CATEGORIES[p % 8], name floor(p / 8)).
+const NAMES: string[][] = [
+  ['Merino Base Layer', 'Waterproof Shell Jacket', 'Everyday Hoodie', 'Trail Running Shorts', 'Wool Hiking Socks'],
+  ['Linen Duvet Cover', 'Ceramic Table Lamp', 'Woven Throw Blanket', 'Oak Wall Shelf', 'Scented Soy Candle'],
+  ['Vitamin C Serum', 'Mineral Sunscreen', 'Hydrating Face Cream', 'Bamboo Hair Brush', 'Clay Face Mask'],
+  ['Two-Person Tent', 'Insulated Water Bottle', 'Headlamp 400 Lumen', 'Camp Cooking Set', 'Trekking Poles'],
+  ['Cast Iron Skillet', 'Chef Knife 8 Inch', 'Bamboo Cutting Board', 'Pour-Over Coffee Set', 'Glass Meal Prep Set'],
+  ['Orthopedic Dog Bed', 'Chew-Proof Dog Toy', 'Cat Scratching Post', 'No-Pull Dog Harness', 'Slow Feeder Bowl'],
+  ['Adjustable Dumbbells', 'Yoga Mat Pro', 'Resistance Band Set', 'Foam Roller', 'Speed Jump Rope'],
+  ['Wooden Building Blocks', 'Magnetic Tile Set', 'Plush Rescue Dog', 'Kids Art Easel', 'Volcano Science Kit'],
+];
 const VARIANTS = ['Small', 'Medium', 'Large', 'XL', 'One Size'];
 const PRODUCT_COUNT = 40; // x 5 variants = 200 SKUs
 
@@ -90,8 +101,8 @@ export async function seedDemoOrg(
         productRows.push({
           id: productId,
           orgId: DEMO_ORG_ID,
-          title: `Demo Product ${p + 1}`,
-          brand: 'Demo Co',
+          title: NAMES[p % CATEGORIES.length]![Math.floor(p / CATEGORIES.length)]!,
+          brand: 'Demo Outfitters',
           category: CATEGORIES[p % CATEGORIES.length],
         });
         const baseCost = 400 + Math.floor(rand() * 5600);
@@ -154,6 +165,16 @@ export async function seedDemoOrg(
               effectiveFrom: '2025-01-01',
             });
         });
+      }
+      // The Amazon-loss SKU needs a modest landed cost ($12) so a healthy markup still loses money on Amazon.
+      const lossSku = skuRows.find((r) => r.skuCode === DEMO_STORY.amazonLossSkuCode)!;
+      for (let i = costRows.length - 1; i >= 0; i--) if (costRows[i]!.skuId === lossSku.id) costRows.splice(i, 1);
+      for (const [componentType, amountCents] of [
+        ['product_cost', 900],
+        ['inbound_freight', 150],
+        ['packaging', 150],
+      ] as const) {
+        costRows.push({ orgId: DEMO_ORG_ID, skuId: lossSku.id!, perUnit: true, componentType, amountCents, effectiveFrom: '2025-01-01' });
       }
       // Time-versioned landed cost: every component in effect on the date, from <= date < to.
       const costsBySku = new Map<string, (typeof s.skuCostComponents.$inferInsert)[]>();

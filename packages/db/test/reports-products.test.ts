@@ -58,6 +58,8 @@ beforeAll(async () => {
   await addOrder(r.owner, {
     placedAt: '2026-03-12T15:00:00Z',
     gross: 1150,
+    paymentFee: 40,
+    fulfillment: 500,
     lines: [{ quantity: 1, price: 1150, cogs: 1000, skuId: UNDER }],
   });
 }, 180_000);
@@ -95,6 +97,12 @@ describe('getProducts', () => {
   it('shows contributionNegative for the amazon-loss SKU on amazon but not on shopify_online', async () => {
     expect(row(await products('amazon'), 'AMZ-LOSS').contributionNegative).toBe(true);
     expect(row(await products('shopify_online'), 'AMZ-LOSS').contributionNegative).toBe(false);
+  });
+
+  it('reports what one unit earns after fees on each channel', async () => {
+    expect(row(await products('amazon'), 'AMZ-LOSS').contributionCents).toBe(5000 - 4100 - 750 - 550);
+    expect(row(await products('shopify_online'), 'AMZ-LOSS').contributionCents).toBe(5000 - 4100 - 175 - 500);
+    expect(row(await products(), 'NOCOST-1').contributionCents).toBeNull();
   });
 
   it('computes per-SKU profit after cost of goods and allocated fees', async () => {

@@ -34,7 +34,7 @@ async function addSku(skuId: string, code: string, price: number, landed: number
 beforeAll(async () => {
   r = await startReportDb();
   await addSku(UNDER, 'UNDER-1', 1150, 1000);
-  await addSku(AMZ_LOSS, 'AMZ-LOSS', 5000, 4100);
+  await addSku(AMZ_LOSS, 'AMZ-LOSS', 1882, 1200);
   await addSku(LOW, 'LOW-1', 2000, 1000);
   await r.owner.query(
     `insert into locations (id, org_id, name, type, source) values ($1, $2, 'Main warehouse', 'warehouse', 'manual')`,
@@ -50,15 +50,15 @@ beforeAll(async () => {
     await addAdDay(r.owner, { campaign: 'Meta - Small Loser', date: d, spend: 2000, revenue: 3500 });
     await addAdDay(r.owner, { campaign: 'Meta - Tiny Loser', date: d, spend: 1000, revenue: 1800 });
   }
-  // One Amazon unit a day of the Amazon-loss SKU: 15% + $5.50 fees lose $4.00 a unit.
+  // One Amazon unit a day of the Amazon-loss SKU: price $18.82 has a healthy markup, but 15% + $5.50 fees lose $1.50 a unit.
   for (const d of days) {
     await addOrder(r.owner, {
       channel: 'amazon',
       placedAt: `${d}T16:00:00Z`,
-      gross: 5000,
-      marketplaceFee: 750,
+      gross: 1882,
+      marketplaceFee: 282,
       fulfillment: 550,
-      lines: [{ quantity: 1, price: 5000, cogs: 4100, skuId: AMZ_LOSS }],
+      lines: [{ quantity: 1, price: 1882, cogs: 1200, skuId: AMZ_LOSS }],
     });
   }
 }, 300_000);

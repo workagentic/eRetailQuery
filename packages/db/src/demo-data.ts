@@ -68,11 +68,11 @@ export function applyStory(skus: SeedSku[], landedNow: (skuId: string) => number
       return { ...sku, sellingPriceCents: Math.round(landed * 1.15) };
     }
     if (sku.skuCode === DEMO_STORY.amazonLossSkuCode) {
-      // Earns about $1 per unit on Shopify, so it loses money on Amazon where fees take a bigger share.
-      const target = landed + FEE_MODEL.shopifyFulfillmentCents + FEE_MODEL.shopifyPaymentFixedCents + 100;
+      // Loses about $1.50 a unit on Amazon (15% referral + FBA fee) while still earning on Shopify.
+      const target = landed + FEE_MODEL.amazonFbaPerUnitCents - 150;
       return {
         ...sku,
-        sellingPriceCents: Math.ceil(target / (1 - FEE_MODEL.shopifyPaymentBps / 10000)),
+        sellingPriceCents: Math.ceil(target / (1 - FEE_MODEL.amazonReferralBps / 10000)),
       };
     }
     return sku;
@@ -253,15 +253,26 @@ export function generateDemoData(input: GenerateInput): DemoData {
     }
   }
 
-  // Inventory: stock sized from the last 30 days of sales; planted SKUs are about to run out.
+  // Inventory: stock sized from the same weighted velocity the app uses (7, 30 and 90 days, 50/30/20),
+  // so ordinary SKUs hold 35 to 125 days of cover and only the planted SKUs are about to run out.
+  const since7 = addDays(endDate, -6);
   const since30 = addDays(endDate, -29);
+  const since90 = addDays(endDate, -89);
   const orderDay = new Map(orders.map((o) => [o.id!, (o.placedAt as Date).toISOString().slice(0, 10)]));
-  const units30 = new Map<string, number>();
+  const units = new Map<string, { u7: number; u30: number; u90: number }>();
   for (const l of orderLines) {
-    if (orderDay.get(l.orderId)! >= since30) {
-      units30.set(l.skuId!, (units30.get(l.skuId!) ?? 0) + l.quantity);
-    }
+    const d = orderDay.get(l.orderId)!;
+    if (d < since90) continue;
+    const u = units.get(l.skuId!) ?? { u7: 0, u30: 0, u90: 0 };
+    u.u90 += l.quantity;
+    if (d >= since30) u.u30 += l.quantity;
+    if (d >= since7) u.u7 += l.quantity;
+    units.set(l.skuId!, u);
   }
+  const weightedVelocity = (skuId: string): number => {
+    const u = units.get(skuId);
+    return u ? 0.5 * (u.u7 / 7) + 0.3 * (u.u30 / 30) + 0.2 * (u.u90 / 90) : 0;
+  };
   const lowStock = new Set<string>(DEMO_STORY.lowStockSkuCodes);
   const locations: LocationRow[] = [
     { id: uuid('8005', 1), orgId, name: 'Main warehouse', type: 'warehouse', source: 'manual' },
@@ -269,12 +280,12 @@ export function generateDemoData(input: GenerateInput): DemoData {
   ];
   const inventoryLevels: InventoryLevelRow[] = [];
   skus.forEach((sku, idx) => {
-    const velocity = (units30.get(sku.id) ?? 0) / 30;
+    const velocity = weightedVelocity(sku.id);
     let onHand: number;
-    if (lowStock.has(sku.skuCode)) onHand = Math.max(1, Math.round(velocity * 2.5));
+    if (lowStock.has(sku.skuCode)) onHand = Math.max(1, Math.floor(velocity * 2.5));
     else if (velocity === 0) onHand = idx % 7 === 0 ? 0 : 5 + Math.floor(rand() * 60);
-    else if (idx % 25 === 0) onHand = Math.round(velocity * 300);
-    else onHand = Math.round(velocity * (20 + Math.floor(rand() * 100)));
+    else if (idx % 25 === 0) onHand = Math.ceil(velocity * 300);
+    else onHand = Math.ceil(velocity * (35 + Math.floor(rand() * 90)));
     const fba = Math.floor(onHand / 4);
     inventoryLevels.push(
       { orgId, skuId: sku.id, locationId: locations[0]!.id!, onHand: onHand - fba, reserved: 0, incoming: 0 },

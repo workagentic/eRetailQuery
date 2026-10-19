@@ -11,6 +11,8 @@ export interface OrderAgg {
   date: string;
   channel: SalesChannelName;
   orders: number;
+  /** Units sold (sum of line quantities). */
+  units: number;
   gross: number;
   discount: number;
   refund: number;
@@ -63,14 +65,16 @@ export async function loadOrderAgg(
     ), lines as (
       select l.order_id,
              coalesce(sum(l.unit_cogs_cents_snapshot * l.quantity), 0) as cogs,
-             count(*) filter (where l.unit_cogs_cents_snapshot is null) as missing
+             count(*) filter (where l.unit_cogs_cents_snapshot is null) as missing,
+             sum(l.quantity) as units
       from order_lines l where l.order_id in (select id from od) group by l.order_id
     )
     select od.d::text as date, od.channel::text as channel, count(*) as orders,
            sum(od.gross_cents) as gross, sum(od.discount_cents) as discount, sum(od.refund_cents) as refund,
            sum(od.payment_fee_cents) as payment_fee, sum(od.marketplace_fee_cents) as marketplace_fee,
            sum(od.fulfillment_cost_cents) as fulfillment,
-           coalesce(sum(lines.cogs), 0) as cogs, coalesce(sum(lines.missing), 0) as missing
+           coalesce(sum(lines.cogs), 0) as cogs, coalesce(sum(lines.missing), 0) as missing,
+           coalesce(sum(lines.units), 0) as units
     from od left join lines on lines.order_id = od.id
     group by 1, 2 order by 1, 2`);
   return (res.rows as Record<string, unknown>[])
@@ -78,6 +82,7 @@ export async function loadOrderAgg(
       date: String(r.date),
       channel: String(r.channel) as SalesChannelName,
       orders: num(r.orders),
+      units: num(r.units),
       gross: num(r.gross),
       discount: num(r.discount),
       refund: num(r.refund),

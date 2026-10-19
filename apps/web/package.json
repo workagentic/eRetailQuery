@@ -11,6 +11,8 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@erq/db": "workspace:*",
+    "@erq/metrics": "workspace:*",
     "@erq/shared": "workspace:*",
     "@erq/ui": "workspace:*",
     "@next/env": "^15",

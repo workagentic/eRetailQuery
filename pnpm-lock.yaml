@@ -138,6 +138,12 @@ importers:
 
   apps/web:
     dependencies:
+      '@erq/db':
+        specifier: workspace:*
+        version: link:../../packages/db
+      '@erq/metrics':
+        specifier: workspace:*
+        version: link:../../packages/metrics
       '@erq/shared':
         specifier: workspace:*
         version: link:../../packages/shared

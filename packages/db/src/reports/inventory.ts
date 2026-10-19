@@ -69,7 +69,7 @@ export async function getInventory(tx: Tx, p: { asOf: string }): Promise<Invento
   const landedRows = (
     await tx.execute(sql`
       select sku_id, sum(amount_cents) as landed from sku_cost_components
-      where per_unit and effective_from <= ${p.asOf}::date and (effective_to is null or ${p.asOf}::date < effective_to)
+      where per_unit and currency = 'USD' and effective_from <= ${p.asOf}::date and (effective_to is null or ${p.asOf}::date < effective_to)
       group by sku_id`)
   ).rows as Record<string, unknown>[];
   const landed = new Map(landedRows.map((r) => [String(r.sku_id), num(r.landed)]));

@@ -16,6 +16,7 @@ const row = (over: Partial<ProductRow> = {}): ProductRow => ({
   pricingStatus: 'healthy',
   contributionNegative: false,
   contributionCents: 1500,
+  costIncomplete: false,
   unitsSold: 12,
   revenueCents: 59988,
   profitCents: 1234,

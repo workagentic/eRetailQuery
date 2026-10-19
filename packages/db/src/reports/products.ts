@@ -20,6 +20,8 @@ export interface ProductRow {
   pricingStatus: 'underpriced' | 'healthy' | 'premium' | 'no_cost';
   /** The markup looks fine but each sale loses money after fees and shipping. */
   contributionNegative: boolean;
+  /** Some cost components were left out because they are per batch or in another currency. */
+  costIncomplete: boolean;
   /** What one unit sold alone earns after cost of goods, fees and fulfillment at the current price; null without a cost. */
   contributionCents: number | null;
   unitsSold: number;
@@ -53,7 +55,13 @@ export async function getProducts(
       from sku_cost_components`)
   ).rows as Record<string, unknown>[];
   const costsBySku = new Map<string, CostComponent[]>();
+  const skippedCosts = new Set<string>();
   for (const c of costRows) {
+    // landedCost only sums per-unit amounts in the report currency; anything else is left out and flagged.
+    if (!c.per_unit || String(c.currency) !== REPORT_CURRENCY) {
+      skippedCosts.add(String(c.sku_id));
+      continue;
+    }
     const list = costsBySku.get(String(c.sku_id)) ?? [];
     list.push({
       componentType: String(c.component_type),
@@ -130,11 +138,16 @@ export async function getProducts(
       idealHighCents: pricing.idealRange?.high.cents ?? null,
       pricingStatus: code,
       contributionNegative: hasCost && pricing.contribution.cents < 0,
+      costIncomplete: skippedCosts.has(skuId),
       contributionCents: hasCost ? pricing.contribution.cents : null,
       unitsSold: num(sale?.units),
       revenueCents: revenue,
       profitCents: profit,
-      message: pricing.warning?.explanation ?? pricing.status.explanation,
+      message:
+        (pricing.warning?.explanation ?? pricing.status.explanation) +
+        (skippedCosts.has(skuId)
+          ? ' Some cost components are per batch or in another currency and are not counted.'
+          : ''),
     };
   });
 

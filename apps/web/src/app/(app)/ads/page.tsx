@@ -77,6 +77,12 @@ export default async function AdsPage({ searchParams }: { searchParams: Promise<
         </p>
       </div>
       <FilterBar path="/ads" filters={ctx.filters} showChannel={false} />
+      {!ads.costComplete && (
+        <p role="status" className="rounded-md border border-border bg-muted p-3 text-sm">
+          Heads up: cost data incomplete. Some products sold in this period have no cost on record, so every
+          break-even point is lower than reality and some ads may look better than they are.
+        </p>
+      )}
       {ads.usedGenericBands && (
         <p role="status" className="rounded-md border border-border bg-muted p-3 text-sm">
           There is no cost data for some sales, so verdicts use generic ROAS bands. Add costs on the Products page

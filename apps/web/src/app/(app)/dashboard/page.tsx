@@ -16,7 +16,12 @@ export default async function DashboardPage({
   const ctx = await loadReportContext(await searchParams);
   const { overview, attention } = await ctx.db.withTenant(ctx.orgId, async (tx) => ({
     overview: await getOverview(tx, { range: ctx.range, previous: ctx.previous, channel: ctx.filters.channel }),
-    attention: await getAttention(tx, { range: ctx.range, previous: ctx.previous, asOf: ctx.asOf }),
+    attention: await getAttention(tx, {
+      range: ctx.range,
+      previous: ctx.previous,
+      asOf: ctx.asOf,
+      channel: ctx.filters.channel,
+    }),
   }));
   const empty = overview.kpis.orders.value === 0 && overview.kpis.orders.previous === 0;
 

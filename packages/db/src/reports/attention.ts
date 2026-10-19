@@ -1,10 +1,10 @@
 import { formatMoney, money } from '@erq/shared';
 import type { Tx } from '../tenant-db';
-import { REPORT_CURRENCY } from './aggregate';
+import { REPORT_CURRENCY, adPlatformChannel, channelMatches } from './aggregate';
 import { getAds } from './ads';
 import { getInventory } from './inventory';
 import { getProducts } from './products';
-import type { ReportRange } from './types';
+import type { ChannelFilter, ReportRange } from './types';
 
 export interface AttentionItem {
   kind: 'losing_ad' | 'underpriced' | 'amazon_loss' | 'low_stock';
@@ -29,12 +29,15 @@ const severityFor = (stake: number): AttentionItem['severity'] =>
 /** The five things an owner should look at first, ranked by dollars at stake. Composes the other reports. */
 export async function getAttention(
   tx: Tx,
-  p: { range: ReportRange; previous: ReportRange; asOf: string },
+  p: { range: ReportRange; previous: ReportRange; asOf: string; channel?: ChannelFilter },
 ): Promise<AttentionItem[]> {
+  const channel = p.channel ?? 'all';
   const items: AttentionItem[] = [];
 
   const ads = await getAds(tx, { range: p.range, asOf: p.asOf });
-  for (const c of ads.campaigns.filter((x) => x.flag === 'losing')) {
+  for (const c of ads.campaigns.filter(
+    (x) => x.flag === 'losing' && channelMatches(channel, adPlatformChannel(x.platform)),
+  )) {
     const stake = (c.estimatedDailyLossCents ?? 0) * 7;
     items.push({
       kind: 'losing_ad',
@@ -47,7 +50,7 @@ export async function getAttention(
     });
   }
 
-  const all = await getProducts(tx, { range: p.range, channel: 'all', asOf: p.asOf });
+  const all = await getProducts(tx, { range: p.range, channel, asOf: p.asOf });
   const underpriced = all.filter((x) => x.pricingStatus === 'underpriced' && x.unitsSold > 0);
   for (const s of underpriced) {
     const stake = Math.max(0, (s.idealLowCents ?? s.priceCents) - s.priceCents) * s.unitsSold;
@@ -62,7 +65,10 @@ export async function getAttention(
     });
   }
 
-  const amazon = await getProducts(tx, { range: p.range, channel: 'amazon', asOf: p.asOf });
+  const amazon =
+    channel === 'shopify_online'
+      ? []
+      : await getProducts(tx, { range: p.range, channel: 'amazon', asOf: p.asOf });
   // A SKU already listed as underpriced is not reported twice; its low price is the cause.
   const listed = new Set(underpriced.map((x) => x.skuId));
   const losers = amazon

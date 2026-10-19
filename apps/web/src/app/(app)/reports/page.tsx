@@ -32,7 +32,7 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
         </p>
       </div>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
-        <FilterBar path={`/reports?month=${month}`} filters={ctx.filters} showRange={false} />
+        <FilterBar path="/reports" query={{ month }} filters={ctx.filters} showRange={false} />
         <nav aria-label="Month" className="flex flex-wrap items-center gap-2 text-sm">
           <Link href={href(shiftMonth(month, -1))} className="rounded-md border border-border px-3 py-1">
             Previous month

@@ -49,6 +49,8 @@ export interface AdsReport {
   campaigns: AdCampaignRow[];
   /** True when there was no cost data to compute a break-even ROAS, so generic bands were used. */
   usedGenericBands: boolean;
+  /** False when some sold units have no cost on record, so break-even ROAS is flattered. */
+  costComplete: boolean;
 }
 
 const num = (v: unknown): number => Number(v ?? 0);
@@ -132,10 +134,17 @@ export async function getAds(
       days: flagDays,
       contributionBeforeAds: contribution(adPlatformChannel(platform)),
     });
-    if (flag.usedGenericBands) anyGeneric = true;
+    const margin = contribution(adPlatformChannel(platform));
+    // Generic bands mean "no usable cost data". A channel that loses money before ads is a different case:
+    // costs are known, and any ad spend there only adds to the loss, whatever the ROAS.
+    if (flag.usedGenericBands && margin === null) anyGeneric = true;
     const spend = num(t.spend);
     const revenue = num(t.revenue);
-    const loss = flag.estimatedDailyLoss?.cents ?? null;
+    const everySaleLoses = margin !== null && margin <= 0 && flag.code !== 'learning';
+    const dailySpend =
+      flag.facts.daysUsed > 0 ? Math.round(flag.facts.spend.cents / flag.facts.daysUsed) : 0;
+    const code: AdFlagCode = everySaleLoses ? 'losing' : flag.code;
+    const loss = everySaleLoses ? dailySpend : (flag.estimatedDailyLoss?.cents ?? null);
     return {
       id,
       name: String(t.name),
@@ -143,9 +152,11 @@ export async function getAds(
       spendCents: spend,
       platformRevenueCents: revenue,
       roas: ratio(revenue, spend),
-      flag: flag.code,
-      reason: flag.explanation,
-      action: actionFor(flag.code, loss),
+      flag: code,
+      reason: everySaleLoses
+        ? 'Every sale on the channel this ad sells on loses money before ads (after cost of goods, fees and fulfillment), so ad spend only adds to the loss.'
+        : flag.explanation,
+      action: actionFor(code, loss),
       estimatedDailyLossCents: loss,
     };
   });
@@ -179,5 +190,6 @@ export async function getAds(
     byPlatform,
     campaigns,
     usedGenericBands: anyGeneric,
+    costComplete: allOrders.costComplete,
   };
 }

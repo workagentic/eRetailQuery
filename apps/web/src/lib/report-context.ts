@@ -1,7 +1,9 @@
 import 'server-only';
+import { notFound } from 'next/navigation';
 import { getDataEndDate, resolveRange, type ReportRange, type TenantDb } from '@erq/db';
 import { loadAppContext } from './app-context';
 import { getTenantDb } from './db';
+import { isDemoMode } from './demo-mode';
 import { parseFilters, type Filters, type SearchParams } from './filters';
 
 export interface ReportContext {
@@ -17,6 +19,8 @@ export interface ReportContext {
 
 /** Everything a report page needs before it queries: the active org, the filters and the date ranges. */
 export async function loadReportContext(searchParams: SearchParams): Promise<ReportContext> {
+  // These pages read the database directly, which only demo mode (docs/demo.md) is set up for.
+  if (!isDemoMode()) notFound();
   const { active } = await loadAppContext();
   const filters = parseFilters(searchParams);
   const db = getTenantDb();

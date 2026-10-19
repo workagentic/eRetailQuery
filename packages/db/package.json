@@ -29,7 +29,8 @@
     "test": "vitest run",
     "generate": "drizzle-kit generate",
     "migrate": "tsx src/cli/migrate.ts",
-    "seed": "tsx src/cli/seed.ts"
+    "seed": "tsx src/cli/seed.ts",
+    "demo:provision": "tsx src/cli/provision-demo.ts"
   },
   "dependencies": {
     "@erq/metrics": "workspace:*",

@@ -14,7 +14,8 @@
     "test:e2e": "pnpm --filter @erq/web test:e2e",
     "lint": "eslint . && prettier --check .",
     "typecheck": "turbo run typecheck",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "db:demo": "pnpm --filter @erq/db demo:provision"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

@@ -261,6 +261,9 @@ importers:
 
   packages/db:
     dependencies:
+      '@erq/metrics':
+        specifier: workspace:*
+        version: link:../metrics
       '@erq/shared':
         specifier: workspace:*
         version: link:../shared

@@ -2,8 +2,14 @@ import { drizzle } from 'drizzle-orm/node-postgres';
 import { eq } from 'drizzle-orm';
 import { Pool } from 'pg';
 import * as s from './schema';
+import { applyStory, generateDemoData, type SeedSku } from './demo-data';
 
 export const DEMO_ORG_ID = '00000000-0000-4000-8000-000000000001';
+export const DEMO_STORE_IDS = {
+  shopify: '00000000-0000-4000-8009-000000000001',
+  woocommerce: '00000000-0000-4000-8009-000000000002',
+  amazon: '00000000-0000-4000-8009-000000000003',
+} as const;
 export const DEMO_USER_IDS = {
   owner: '00000000-0000-4000-8000-0000000000a1',
   analyst: '00000000-0000-4000-8000-0000000000a2',
@@ -26,7 +32,19 @@ const CATEGORIES = ['Apparel', 'Home', 'Beauty', 'Outdoor', 'Kitchen', 'Pets', '
 const VARIANTS = ['Small', 'Medium', 'Large', 'XL', 'One Size'];
 const PRODUCT_COUNT = 40; // x 5 variants = 200 SKUs
 
-export async function seedDemoOrg(ownerUrl: string): Promise<void> {
+function chunks<T>(rows: T[], size = 1000): T[][] {
+  const out: T[][] = [];
+  for (let i = 0; i < rows.length; i += size) out.push(rows.slice(i, i + size));
+  return out;
+}
+
+/** Defaults to the 365 days ending yesterday (UTC), so reseed shortly before a demo. */
+export async function seedDemoOrg(
+  ownerUrl: string,
+  opts: { endDate?: string; days?: number } = {},
+): Promise<void> {
+  const endDate =
+    opts.endDate ?? new Date(Date.now() - 86_400_000).toISOString().slice(0, 10);
   const pool = new Pool({ connectionString: ownerUrl, max: 1 });
   const db = drizzle(pool, { schema: s });
   const rand = rng(42);
@@ -42,18 +60,21 @@ export async function seedDemoOrg(ownerUrl: string): Promise<void> {
       await tx.insert(s.subscriptions).values({ orgId: DEMO_ORG_ID, plan: 'free' });
       await tx.insert(s.storeConnections).values([
         {
+          id: DEMO_STORE_IDS.shopify,
           orgId: DEMO_ORG_ID,
           platform: 'shopify',
           externalAccountId: 'demo-shopify',
           status: 'demo',
         },
         {
+          id: DEMO_STORE_IDS.woocommerce,
           orgId: DEMO_ORG_ID,
           platform: 'woocommerce',
           externalAccountId: 'demo-woo',
           status: 'demo',
         },
         {
+          id: DEMO_STORE_IDS.amazon,
           orgId: DEMO_ORG_ID,
           platform: 'amazon',
           externalAccountId: 'demo-amazon',
@@ -134,9 +155,50 @@ export async function seedDemoOrg(ownerUrl: string): Promise<void> {
             });
         });
       }
+      // Time-versioned landed cost: every component in effect on the date, from <= date < to.
+      const costsBySku = new Map<string, (typeof s.skuCostComponents.$inferInsert)[]>();
+      for (const c of costRows) {
+        const list = costsBySku.get(c.skuId) ?? [];
+        list.push(c);
+        costsBySku.set(c.skuId, list);
+      }
+      const costAt = (skuId: string, date: string): number =>
+        (costsBySku.get(skuId) ?? [])
+          .filter((c) => c.effectiveFrom <= date && (!c.effectiveTo || date < c.effectiveTo))
+          .reduce((a, c) => a + c.amountCents, 0);
+      const today = new Date().toISOString().slice(0, 10);
+      const storySkus = applyStory(
+        skuRows.map((r) => ({
+          id: r.id!,
+          skuCode: r.skuCode,
+          productId: r.productId,
+          sellingPriceCents: r.sellingPriceCents,
+        })) satisfies SeedSku[],
+        (skuId) => costAt(skuId, today),
+      );
+      const priceById = new Map(storySkus.map((x) => [x.id, x.sellingPriceCents]));
+      for (const r of skuRows) r.sellingPriceCents = priceById.get(r.id!)!;
+
       await tx.insert(s.products).values(productRows);
       await tx.insert(s.skus).values(skuRows);
       await tx.insert(s.skuCostComponents).values(costRows);
+
+      const demo = generateDemoData({
+        orgId: DEMO_ORG_ID,
+        skus: storySkus,
+        connections: { shopify: DEMO_STORE_IDS.shopify, amazon: DEMO_STORE_IDS.amazon },
+        endDate,
+        days: opts.days ?? 365,
+        rand: rng(4242),
+        costAt,
+      });
+      for (const c of chunks(demo.orders)) await tx.insert(s.orders).values(c);
+      for (const c of chunks(demo.orderLines)) await tx.insert(s.orderLines).values(c);
+      await tx.insert(s.locations).values(demo.locations);
+      for (const c of chunks(demo.inventoryLevels)) await tx.insert(s.inventoryLevels).values(c);
+      await tx.insert(s.adConnections).values(demo.adConnections);
+      await tx.insert(s.adCampaigns).values(demo.adCampaigns);
+      for (const c of chunks(demo.adInsights)) await tx.insert(s.adInsightsDaily).values(c);
     });
   } finally {
     await pool.end();

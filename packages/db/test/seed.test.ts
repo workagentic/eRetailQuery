@@ -65,3 +65,27 @@ it('includes SKUs whose product cost changed over time (time-versioned)', async 
   );
   expect(rows[0].n).toBeGreaterThan(0);
 });
+
+it('seeds Shopify and Amazon orders, fees, inventory and ad insights for the demo org', async () => {
+  const { rows } = await owner.query(
+    `select (select count(*) from orders where org_id = $1 and channel = 'shopify_online')::int shopify,
+            (select count(*) from orders where org_id = $1 and channel = 'amazon')::int amazon,
+            (select count(*) from order_lines where org_id = $1 and unit_cogs_cents_snapshot is null)::int unpriced,
+            (select count(*) from inventory_levels where org_id = $1)::int levels,
+            (select count(*) from ad_campaigns where org_id = $1)::int campaigns,
+            (select count(*) from ad_insights_daily where org_id = $1)::int insights`,
+    [DEMO_ORG_ID],
+  );
+  expect(rows[0].shopify).toBeGreaterThan(1500);
+  expect(rows[0].amazon).toBeGreaterThan(1000);
+  expect(rows[0].unpriced).toBe(0);
+  expect(rows[0].levels).toBe(400);
+  expect(rows[0].campaigns).toBe(8);
+  expect(rows[0].insights).toBe(8 * 365);
+});
+
+it('seeds a full year in under 60 seconds', async () => {
+  const started = Date.now();
+  await seedDemoOrg(tdb.ownerUrl);
+  expect(Date.now() - started).toBeLessThan(60_000);
+}, 120_000);

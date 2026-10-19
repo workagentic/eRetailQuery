@@ -19,7 +19,7 @@ import { storeConnections } from './connections';
 import { tenantId } from './tenant';
 import { timestamps } from './timestamps';
 
-export const salesChannel = pgEnum('sales_channel', ['shopify_online', 'shopify_pos']);
+export const salesChannel = pgEnum('sales_channel', ['shopify_online', 'shopify_pos', 'amazon']);
 export const orderStatus = pgEnum('order_status', ['open', 'closed', 'cancelled']);
 export const syncResource = pgEnum('sync_resource', [
   'products',
@@ -48,6 +48,12 @@ export const orders = pgTable(
     refundCents: bigint('refund_cents', { mode: 'number' }).notNull(),
     /** gross - discount - refund; negative when refunds exceed sales. */
     netCents: bigint('net_cents', { mode: 'number' }).notNull(),
+    /** Processing fee charged by the payment provider; 0 until a sync or settlement fills it. */
+    paymentFeeCents: bigint('payment_fee_cents', { mode: 'number' }).notNull().default(0),
+    /** Marketplace referral fee (Amazon). */
+    marketplaceFeeCents: bigint('marketplace_fee_cents', { mode: 'number' }).notNull().default(0),
+    /** Pick, pack and outbound shipping we pay for (FBA fee on Amazon). */
+    fulfillmentCostCents: bigint('fulfillment_cost_cents', { mode: 'number' }).notNull().default(0),
     /** Opaque platform customer id. No names, emails or addresses are stored (customers table is Phase 2). */
     customerExternalId: text('customer_external_id'),
     utmSource: text('utm_source'),
@@ -68,6 +74,10 @@ export const orders = pgTable(
     check(
       'orders_money_nonneg',
       sql`${t.grossCents} >= 0 and ${t.discountCents} >= 0 and ${t.shippingChargedCents} >= 0 and ${t.taxCents} >= 0 and ${t.refundCents} >= 0`,
+    ),
+    check(
+      'orders_fees_nonneg',
+      sql`${t.paymentFeeCents} >= 0 and ${t.marketplaceFeeCents} >= 0 and ${t.fulfillmentCostCents} >= 0`,
     ),
     index('orders_org_placed_idx').on(t.orgId, t.placedAt),
     index('orders_org_channel_placed_idx').on(t.orgId, t.channel, t.placedAt),

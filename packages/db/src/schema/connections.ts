@@ -14,7 +14,7 @@ import { tenantId } from './tenant';
 import { timestamps } from './timestamps';
 
 export const storePlatform = pgEnum('store_platform', ['shopify', 'woocommerce', 'amazon']);
-export const adPlatform = pgEnum('ad_platform', ['meta', 'google', 'tiktok']);
+export const adPlatform = pgEnum('ad_platform', ['meta', 'google', 'tiktok', 'amazon_ads']);
 export const connectionStatus = pgEnum('connection_status', [
   'pending',
   'active',
@@ -66,6 +66,7 @@ export const adConnections = pgTable(
   },
   (t) => [
     unique('ad_connections_org_platform_acct_uq').on(t.orgId, t.platform, t.externalAccountId),
+    unique('ad_connections_org_id_uq').on(t.orgId, t.id),
   ],
 );
 

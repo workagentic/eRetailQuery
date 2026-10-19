@@ -44,8 +44,19 @@ export const fixtures: Record<string, Fixture> = {
     ),
   ad_connections: (q, org) =>
     q.query(
-      `insert into ad_connections (org_id, platform, external_account_id, status)
-       values ($1, 'meta', 'act-' || ($1::uuid)::text, 'demo')`,
+      `insert into ad_connections (id, org_id, platform, external_account_id, status)
+       values ($1, $1, 'meta', 'act-' || ($1::uuid)::text, 'demo')`,
+      [org],
+    ),
+  ad_campaigns: (q, org) =>
+    q.query(
+      `insert into ad_campaigns (id, org_id, ad_connection_id, external_id, name)
+       values ($1, $1, $1, 'camp-1', 'Fixture campaign')`,
+      [org],
+    ),
+  ad_insights_daily: (q, org) =>
+    q.query(
+      `insert into ad_insights_daily (org_id, campaign_id, date, spend_cents) values ($1, $1, '2026-01-01', 100)`,
       [org],
     ),
   sync_runs: (q, org) =>

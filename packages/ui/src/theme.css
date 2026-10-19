@@ -8,6 +8,9 @@
   --color-primary-foreground: #ffffff;
   --color-destructive: #b91c1c;
   --color-ring: #2563eb;
+  --color-chart-1: #1d4ed8;
+  --color-chart-2: #0f766e;
+  --color-chart-3: #b45309;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -19,5 +22,8 @@
     --color-border: #334155;
     --color-primary: #3b82f6;
     --color-primary-foreground: #0b1220;
+    --color-chart-1: #60a5fa;
+    --color-chart-2: #2dd4bf;
+    --color-chart-3: #fbbf24;
   }
 }

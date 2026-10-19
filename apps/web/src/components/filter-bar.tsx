@@ -22,10 +22,12 @@ export function FilterBar({
   path,
   filters,
   showRange = true,
+  showChannel = true,
 }: {
   path: string;
   filters: Filters;
   showRange?: boolean;
+  showChannel?: boolean;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-x-6 gap-y-2" aria-label="Filters" role="group">
@@ -38,13 +40,15 @@ export function FilterBar({
           ))}
         </div>
       )}
-      <div className="flex flex-wrap gap-2">
-        {(Object.keys(CHANNEL_LABEL) as ChannelFilter[]).map((c) => (
-          <Chip key={c} href={link(path, filters.preset, c)} active={c === filters.channel}>
-            {CHANNEL_LABEL[c]}
-          </Chip>
-        ))}
-      </div>
+      {showChannel && (
+        <div className="flex flex-wrap gap-2">
+          {(Object.keys(CHANNEL_LABEL) as ChannelFilter[]).map((c) => (
+            <Chip key={c} href={link(path, filters.preset, c)} active={c === filters.channel}>
+              {CHANNEL_LABEL[c]}
+            </Chip>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

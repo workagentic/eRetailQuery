@@ -8,7 +8,7 @@ What the boss sees: Dashboard (revenue, orders, ad spend, blended ROAS, money le
 
 | Story | Where it shows |
 |---|---|
-| Meta - Prospecting Broad loses money, about $1,400 a week | Dashboard feed, Ads |
+| Meta - Prospecting Broad loses money, several hundred dollars a week | Dashboard feed, Ads |
 | Google - Shopping Bestsellers wins | Ads |
 | Amazon - Sponsored Brands loses money | Dashboard feed, Ads |
 | Merino Base Layer (DEMO-1-1) is a bestseller priced below the healthy range | Dashboard feed, Products |
@@ -76,7 +76,7 @@ pnpm db:demo         # creates the demo login in Supabase Auth
 
 1. `pnpm db:seed` (refreshes the 365 days to end yesterday). It is safe to repeat.
 2. Open the Vercel URL in a private window, sign in as the demo user, and click through Dashboard, Products, Ads, Inventory and Profit and loss on a laptop and on a phone-width window.
-3. Check that the Dashboard feed lists the planted stories above and that the amber "demo data" banner shows.
+3. Check that the Dashboard feed lists the planted stories above and that the "Demo data" banner shows.
 
 ## Checks to run once on the live site
 

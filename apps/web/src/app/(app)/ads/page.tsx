@@ -5,6 +5,7 @@ import { BarList } from '@/components/bar-list';
 import { DataTable, type Column } from '@/components/data-table';
 import { FilterBar } from '@/components/filter-bar';
 import { Notice, PageHeader, Panel } from '@/components/page-kit';
+import { AdThumb } from '@/components/ad-thumb';
 import { PlatformBadge } from '@/components/platform-badge';
 import { StatusChip } from '@/components/status-chip';
 import { TermTip } from '@/components/term-tip';
@@ -49,7 +50,7 @@ export default async function AdsPage({ searchParams }: { searchParams: Promise<
       label: 'Campaign',
       cell: (c) => (
         <div className="flex items-center gap-3">
-          <PlatformBadge platform={c.platform} size="sm" />
+          <AdThumb name={c.name} platform={c.platform} size="sm" />
           <div className="min-w-0">
             <div className="truncate font-medium text-foreground">{c.name}</div>
             <div className="text-xs text-muted-foreground">{PLATFORM_NAME[c.platform] ?? c.platform}</div>
@@ -168,7 +169,7 @@ export default async function AdsPage({ searchParams }: { searchParams: Promise<
             .sort((a, b) => (b.roas ?? 0) - (a.roas ?? 0))
             .map((c) => ({
               key: c.id,
-              lead: <PlatformBadge platform={c.platform} />,
+              lead: <AdThumb name={c.name} platform={c.platform} />,
               label: c.name,
               sublabel: PLATFORM_NAME[c.platform] ?? c.platform,
               value: c.roas ?? 0,

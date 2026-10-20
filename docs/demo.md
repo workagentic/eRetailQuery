@@ -99,3 +99,7 @@ pnpm db:demo         # creates the demo login in Supabase Auth
 - Row level security is on for every table and the app connects as `app_user`, which cannot bypass it. The Data API is not used; migration `0006` removes the default `anon` and `authenticated` grants.
 - Cost data, margins and order data are visible to anyone who can sign in. Give the login only to people who should see it, and change or delete the demo user afterwards.
 - The demo uses simulated data only. Do not connect real stores to this database.
+
+## Photos
+
+Product and ad pictures are stock photos hotlinked from Pexels (free licence, no attribution required: https://www.pexels.com/license/). The ids live in `apps/web/src/lib/product-art.ts` (by product category) and `apps/web/src/lib/ad-art.ts` (by campaign name). If a photo fails to load, the thumbnail falls back to category artwork. Visitors' browsers request the images from Pexels directly, which shares their IP address with Pexels; the images are sent with no referrer. Real photos arrive with the store sync and ad account connections.

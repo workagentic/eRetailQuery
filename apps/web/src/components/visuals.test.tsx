@@ -1,5 +1,6 @@
 import { renderToStaticMarkup } from 'react-dom/server';
 import { describe, expect, it } from 'vitest';
+import { AdThumb } from './ad-thumb';
 import { BarList } from './bar-list';
 import { ChannelBars } from './channel-bars';
 import { PnlWaterfall } from './pnl-waterfall';
@@ -76,14 +77,28 @@ describe('SegmentBar', () => {
 });
 
 describe('ProductThumb', () => {
-  it('draws category artwork that is hidden from screen readers', () => {
-    const html = renderToStaticMarkup(<ProductThumb category="Apparel" />);
-    expect(html).toContain('aria-hidden="true"');
-    expect(html).toContain('<svg');
-    expect(html).toContain('linear-gradient');
+  it('shows a stock photo for a known category, hidden from screen readers and without a referrer', () => {
+    const html = renderToStaticMarkup(<ProductThumb category="Apparel" seed="Merino Base Layer" />);
+    expect(html).toContain('<img');
+    expect(html).toContain('https://images.pexels.com/photos/');
+    expect(html).toContain('alt=""');
+    expect(html).toContain('loading="lazy"');
+    expect(html).toMatch(/referrer[Pp]olicy="no-referrer"/);
   });
-  it('falls back to a generic box for an unknown category', () => {
-    expect(renderToStaticMarkup(<ProductThumb category={null} />)).toContain('<svg');
+  it('falls back to category artwork when there is no photo for the category', () => {
+    const html = renderToStaticMarkup(<ProductThumb category={null} />);
+    expect(html).not.toContain('<img');
+    expect(html).toContain('<svg');
+    expect(html).toContain('aria-hidden="true"');
+  });
+});
+
+describe('AdThumb', () => {
+  it('shows the campaign photo with its platform badge', () => {
+    const html = renderToStaticMarkup(<AdThumb name="Meta - Prospecting Broad" platform="meta" />);
+    expect(html).toContain('<img');
+    expect(html).toContain('images.pexels.com/photos/7625042/');
+    expect(html).toContain('title="Meta"');
   });
 });
 

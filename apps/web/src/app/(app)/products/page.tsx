@@ -52,7 +52,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
       sortable: true,
       cell: (r) => (
         <div className="flex items-center gap-3">
-          <ProductThumb category={r.category} size="sm" />
+          <ProductThumb category={r.category} seed={r.title} size="sm" />
           <div className="min-w-0">
             <div className="truncate font-medium text-foreground">{r.title}</div>
             <div className="text-xs text-muted-foreground">{r.skuCode}</div>
@@ -105,7 +105,7 @@ export default async function ProductsPage({ searchParams }: { searchParams: Pro
     },
   ];
 
-  const lead = (r: ProductRow) => <ProductThumb category={r.category} size="sm" />;
+  const lead = (r: ProductRow) => <ProductThumb category={r.category} seed={r.title} size="sm" />;
   return (
     <>
       <PageHeader

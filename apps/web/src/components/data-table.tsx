@@ -35,7 +35,7 @@ export function DataTable<T>({
       <table className="w-full border-collapse text-sm">
         <caption className="sr-only">{caption}</caption>
         <thead>
-          <tr className="border-b border-border text-left">
+          <tr className="border-b border-border text-left text-[13px] text-muted-foreground">
             {columns.map((c) => {
               const active = sort?.key === c.key;
               const next: Dir = active && sort?.dir === 'desc' ? 'asc' : 'desc';
@@ -44,7 +44,7 @@ export function DataTable<T>({
                   key={c.key}
                   scope="col"
                   aria-sort={active ? (sort?.dir === 'asc' ? 'ascending' : 'descending') : undefined}
-                  className={`whitespace-nowrap px-2 py-2 font-medium ${c.align === 'right' ? 'text-right' : ''}`}
+                  className={`whitespace-nowrap px-3 py-2.5 font-medium ${c.align === 'right' ? 'text-right' : ''}`}
                 >
                   {c.sortable && hrefFor ? (
                     <Link href={hrefFor(c.key, next)} className="underline-offset-4 hover:underline">
@@ -61,11 +61,11 @@ export function DataTable<T>({
         </thead>
         <tbody>
           {rows.map((row) => (
-            <tr key={rowKey(row)} className="border-b border-border align-top">
+            <tr key={rowKey(row)} className="border-b border-border/60 align-top transition-colors last:border-0 hover:bg-muted/50">
               {columns.map((c) => (
                 <td
                   key={c.key}
-                  className={`px-2 py-2 ${c.align === 'right' ? 'text-right tabular-nums' : ''}`}
+                  className={`px-3 py-3 ${c.align === 'right' ? 'text-right tabular-nums' : ''}`}
                 >
                   {c.cell(row)}
                 </td>

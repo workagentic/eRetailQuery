@@ -8,6 +8,7 @@ export interface StockRow {
   skuId: string;
   skuCode: string;
   title: string;
+  category: string | null;
   priceCents: number;
   available: number;
   velocityPerDay: number;
@@ -45,7 +46,7 @@ export async function getInventory(tx: Tx, p: { asOf: string }): Promise<Invento
 
   const levelRows = (
     await tx.execute(sql`
-      select il.sku_id, loc.name as location, il.on_hand, il.reserved, s.sku_code, s.selling_price_cents, pr.title
+      select il.sku_id, loc.name as location, il.on_hand, il.reserved, s.sku_code, s.selling_price_cents, pr.title, pr.category
       from inventory_levels il
       join locations loc on loc.org_id = il.org_id and loc.id = il.location_id
       join skus s on s.org_id = il.org_id and s.id = il.sku_id
@@ -103,6 +104,7 @@ export async function getInventory(tx: Tx, p: { asOf: string }): Promise<Invento
       skuId,
       skuCode: String(row.sku_code),
       title: String(row.title),
+      category: row.category === null ? null : String(row.category),
       priceCents: num(row.selling_price_cents),
       available,
       velocityPerDay: velocity,

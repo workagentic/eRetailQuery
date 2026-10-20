@@ -4,6 +4,7 @@ import { Button, Input, Label } from '@erq/ui';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useState, type FormEvent } from 'react';
+import { isDemoMode } from '@/lib/demo-mode';
 import { createSupabaseBrowserClient } from '@/lib/supabase/client';
 
 export function AuthForm({ mode, next }: { mode: 'login' | 'signup'; next: string }) {
@@ -12,6 +13,7 @@ export function AuthForm({ mode, next }: { mode: 'login' | 'signup'; next: strin
   const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   const isLogin = mode === 'login';
+  const demo = isDemoMode(); // the demo has one provisioned login: no sign-up and no Google
 
   async function onSubmit(e: FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -70,12 +72,15 @@ export function AuthForm({ mode, next }: { mode: 'login' | 'signup'; next: strin
           {notice}
         </p>
       )}
-      <Button type="submit" disabled={pending}>
+      <Button type="submit" disabled={pending} className="h-11">
         {isLogin ? 'Sign in' : 'Create account'}
       </Button>
-      <Button type="button" variant="outline" onClick={google}>
-        Continue with Google
-      </Button>
+      {!demo && (
+        <Button type="button" variant="outline" onClick={google}>
+          Continue with Google
+        </Button>
+      )}
+      {!demo && (
       <p className="text-sm text-muted-foreground">
         {isLogin ? 'New here? ' : 'Already have an account? '}
         <Link
@@ -85,6 +90,7 @@ export function AuthForm({ mode, next }: { mode: 'login' | 'signup'; next: strin
           {isLogin ? 'Create an account' : 'Sign in'}
         </Link>
       </p>
+      )}
     </form>
   );
 }

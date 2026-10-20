@@ -1,29 +1,43 @@
-@theme {
+/*
+ * Design tokens. `@theme static` makes Tailwind emit every variable even when no utility class mentions it,
+ * so charts and inline styles can use var(--color-*) safely.
+ *
+ * Palette (light only): ink is the sidebar, canvas the page behind the cards, brand a deep teal that stands for
+ * "money left", profit and loss are the only red and green on screen. Chart series colours (teal, blue, amber,
+ * violet) were checked with the dataviz palette validator: lightness band, chroma, CVD separation and contrast.
+ */
+@theme static {
   --color-background: #ffffff;
   --color-foreground: #0f172a;
-  --color-muted: #f1f5f9;
-  --color-muted-foreground: #475569;
-  --color-border: #cbd5e1;
-  --color-primary: #1d4ed8;
+  --color-muted: #eef2f6;
+  --color-muted-foreground: #52606f;
+  --color-border: #dde3ea;
+  --color-primary: #0f766e;
   --color-primary-foreground: #ffffff;
   --color-destructive: #b91c1c;
-  --color-ring: #2563eb;
-  --color-chart-1: #1d4ed8;
-  --color-chart-2: #0f766e;
-  --color-chart-3: #b45309;
-}
+  --color-ring: #0d9488;
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --color-background: #0b1220;
-    --color-foreground: #e2e8f0;
-    --color-muted: #1e293b;
-    --color-muted-foreground: #94a3b8;
-    --color-border: #334155;
-    --color-primary: #3b82f6;
-    --color-primary-foreground: #0b1220;
-    --color-chart-1: #60a5fa;
-    --color-chart-2: #2dd4bf;
-    --color-chart-3: #fbbf24;
-  }
+  --color-canvas: #f4f6f9;
+  --color-surface: #ffffff;
+  --color-ink: #0b1f2a;
+  --color-ink-muted: #8fa3b3;
+  --color-ink-line: #17313f;
+  --color-brand: #0d9488;
+  --color-brand-soft: #d9f5f1;
+  --color-profit: #15803d;
+  --color-profit-soft: #dcf5e4;
+  --color-loss: #b91c1c;
+  --color-loss-soft: #fde4e4;
+  --color-warn: #b45309;
+  --color-warn-soft: #fdf0d3;
+
+  --color-chart-1: #0d9488;
+  --color-chart-2: #2563eb;
+  --color-chart-3: #d97706;
+  --color-chart-4: #7c3aed;
+  --color-chart-grid: #e6ebf1;
+  --color-chart-axis: #64748b;
+
+  --radius-card: 14px;
+  --shadow-card: 0 1px 2px rgb(15 31 42 / 0.05), 0 4px 14px rgb(15 31 42 / 0.04);
 }

@@ -1,5 +1,5 @@
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@erq/ui';
 import { AuthForm } from '@/components/auth-form';
+import { AuthLayout } from '@/components/auth-layout';
 import { safeNextPath } from '@/lib/safe-next';
 
 export default async function SignupPage({
@@ -9,16 +9,8 @@ export default async function SignupPage({
 }) {
   const next = safeNextPath((await searchParams).next);
   return (
-    <main className="mx-auto flex min-h-screen max-w-md items-center px-4">
-      <Card className="w-full">
-        <CardHeader>
-          <CardTitle>Create your account</CardTitle>
-          <CardDescription>See what is actually making you money.</CardDescription>
-        </CardHeader>
-        <CardContent>
-          <AuthForm mode="signup" next={next} />
-        </CardContent>
-      </Card>
-    </main>
+    <AuthLayout title="Create your account" subtitle="Connect a store and see your profit in minutes.">
+      <AuthForm mode="signup" next={next} />
+    </AuthLayout>
   );
 }

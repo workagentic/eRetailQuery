@@ -1,6 +1,9 @@
+export type NavIcon = 'dashboard' | 'products' | 'ads' | 'inventory' | 'reports' | 'connections' | 'team';
+
 export interface NavLink {
   href: string;
   label: string;
+  icon: NavIcon;
 }
 
 /**
@@ -10,15 +13,15 @@ export interface NavLink {
 export function mainNav(demo: boolean): NavLink[] {
   return demo
     ? [
-        { href: '/dashboard', label: 'Dashboard' },
-        { href: '/products', label: 'Products' },
-        { href: '/ads', label: 'Ads' },
-        { href: '/inventory', label: 'Inventory' },
-        { href: '/reports', label: 'Profit & loss' },
+        { href: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
+        { href: '/products', label: 'Products', icon: 'products' },
+        { href: '/ads', label: 'Ads', icon: 'ads' },
+        { href: '/inventory', label: 'Inventory', icon: 'inventory' },
+        { href: '/reports', label: 'Profit & loss', icon: 'reports' },
       ]
     : [
-        { href: '/dashboard', label: 'Dashboard' },
-        { href: '/connections', label: 'Connections' },
-        { href: '/team', label: 'Team' },
+        { href: '/dashboard', label: 'Dashboard', icon: 'dashboard' },
+        { href: '/connections', label: 'Connections', icon: 'connections' },
+        { href: '/team', label: 'Team', icon: 'team' },
       ];
 }

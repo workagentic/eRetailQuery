@@ -9,12 +9,20 @@ const link = (
   channel: ChannelFilter,
 ) => `${path}?${new URLSearchParams({ ...query, range: preset, channel }).toString()}`;
 
+function Segment({ children }: { children: React.ReactNode }) {
+  return <div className="inline-flex flex-wrap gap-1 rounded-xl bg-muted p-1">{children}</div>;
+}
+
 function Chip({ href, active, children }: { href: string; active: boolean; children: string }) {
   return (
     <Link
       href={href}
       aria-current={active ? 'true' : undefined}
-      className={`rounded-md border px-3 py-1 text-sm ${active ? 'border-foreground bg-foreground text-background' : 'border-border'}`}
+      className={`rounded-lg px-3 py-1.5 text-[13px] font-medium transition-colors ${
+        active
+          ? 'bg-surface text-foreground shadow-[0_1px_2px_rgb(15_31_42/0.12)]'
+          : 'text-muted-foreground hover:text-foreground'
+      }`}
     >
       {children}
     </Link>
@@ -37,24 +45,24 @@ export function FilterBar({
   showChannel?: boolean;
 }) {
   return (
-    <div className="flex flex-wrap items-center gap-x-6 gap-y-2" aria-label="Filters" role="group">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2" aria-label="Filters" role="group">
       {showRange && (
-        <div className="flex flex-wrap gap-2">
+        <Segment>
           {(Object.keys(PRESET_LABEL) as RangePreset[]).map((p) => (
             <Chip key={p} href={link(path, query, p, filters.channel)} active={p === filters.preset}>
               {PRESET_LABEL[p]}
             </Chip>
           ))}
-        </div>
+        </Segment>
       )}
       {showChannel && (
-        <div className="flex flex-wrap gap-2">
+        <Segment>
           {(Object.keys(CHANNEL_LABEL) as ChannelFilter[]).map((c) => (
             <Chip key={c} href={link(path, query, filters.preset, c)} active={c === filters.channel}>
               {CHANNEL_LABEL[c]}
             </Chip>
           ))}
-        </div>
+        </Segment>
       )}
     </div>
   );

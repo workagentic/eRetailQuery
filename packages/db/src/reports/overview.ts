@@ -26,8 +26,18 @@ export interface Overview {
     estimatedProfit: Compared<Money>;
     marginBps: Compared<number | null>;
   };
+  /** Where the period's net sales went. The five parts add up to netSalesCents (profit may be negative). */
+  breakdown: {
+    netSalesCents: number;
+    cogsCents: number;
+    fulfillmentCents: number;
+    /** Payment processing plus marketplace fees. */
+    feesCents: number;
+    adSpendCents: number;
+    profitCents: number;
+  };
   /** One entry per day in the range, zero-filled so charts stay continuous. */
-  daily: { date: string; revenue: number; profit: number; adSpend: number }[];
+  daily: { date: string; revenue: number; profit: number; adSpend: number; orders: number }[];
   byChannel: {
     channel: SalesChannelName;
     revenue: Money;
@@ -87,7 +97,8 @@ export async function getOverview(
       (a, x) => a + x.cogs + x.paymentFee + x.marketplaceFee + x.fulfillment,
       0,
     );
-    return { date, revenue, profit: revenue - costs - spend, adSpend: spend };
+    const orders = o.reduce((a, x) => a + x.orders, 0);
+    return { date, revenue, profit: revenue - costs - spend, adSpend: spend, orders };
   });
 
   const channels = [...new Set(cur.orders.map((o) => o.channel))].sort();
@@ -105,5 +116,22 @@ export async function getOverview(
   });
 
   const asOf = (await getDataEndDate(tx)) ?? p.range.to;
-  return { currency: REPORT_CURRENCY, asOf, kpis, daily, byChannel, costComplete: curPnl.costComplete };
+  const pnl = curPnl.pnl;
+  const breakdown = {
+    netSalesCents: pnl.netSales.cents,
+    cogsCents: pnl.cogs.cents,
+    fulfillmentCents: pnl.fulfillment.cents,
+    feesCents: pnl.paymentFees.cents + pnl.marketplaceFees.cents,
+    adSpendCents: pnl.adSpend.total.cents,
+    profitCents: pnl.netContributionAfterMarketing.cents,
+  };
+  return {
+    currency: REPORT_CURRENCY,
+    asOf,
+    kpis,
+    breakdown,
+    daily,
+    byChannel,
+    costComplete: curPnl.costComplete,
+  };
 }

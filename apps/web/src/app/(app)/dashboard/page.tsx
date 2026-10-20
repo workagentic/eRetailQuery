@@ -1,10 +1,12 @@
 import { getAttention, getOverview } from '@erq/db';
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@erq/ui';
 import { AttentionFeed } from '@/components/attention-feed';
-import { ChannelSplit } from '@/components/channel-split';
+import { ChannelBars } from '@/components/channel-bars';
 import { FilterBar } from '@/components/filter-bar';
 import { KpiStrip } from '@/components/kpi-strip';
+import { Notice, PageHeader, Panel } from '@/components/page-kit';
+import { SalesSplit } from '@/components/sales-split';
 import { TrendChart } from '@/components/trend-chart';
+import { CHANNEL_NAME } from '@/lib/chart-colors';
 import type { SearchParams } from '@/lib/filters';
 import { loadReportContext } from '@/lib/report-context';
 
@@ -26,44 +28,50 @@ export default async function DashboardPage({
   const empty = overview.kpis.orders.value === 0 && overview.kpis.orders.previous === 0;
 
   return (
-    <div className="flex flex-col gap-6">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-2xl font-semibold">{ctx.orgName}</h1>
-        <p className="text-sm text-muted-foreground">
-          Am I making money? Data as of {overview.asOf} ({ctx.range.from} to {ctx.range.to}).
-        </p>
-      </div>
-      <FilterBar path="/dashboard" filters={ctx.filters} />
+    <>
+      <PageHeader
+        title={ctx.orgName}
+        description={`Am I making money? Data as of ${overview.asOf}, showing ${ctx.range.from} to ${ctx.range.to}.`}
+        actions={<FilterBar path="/dashboard" filters={ctx.filters} />}
+      />
       {!overview.costComplete && (
-        <p role="status" className="rounded-md border border-border bg-muted p-3 text-sm">
+        <Notice>
           Some products have no cost on record, so profit may look better than it is. Add their costs on the
           Products page.
-        </p>
+        </Notice>
       )}
       {empty ? (
-        <Card>
-          <CardHeader>
-            <CardTitle>No sales in this period</CardTitle>
-            <CardDescription>Try a longer date range, or connect a store to see your profit.</CardDescription>
-          </CardHeader>
-          <CardContent className="text-sm text-muted-foreground">Nothing to show yet.</CardContent>
-        </Card>
+        <Panel title="No sales in this period" description="Try a longer date range, or connect a store to see your profit.">
+          <p className="text-sm text-muted-foreground">Nothing to show yet.</p>
+        </Panel>
       ) : (
         <>
-          <KpiStrip kpis={overview.kpis} />
-          <AttentionFeed items={attention} />
-          <Card>
-            <CardHeader>
-              <CardTitle>Revenue and money left after ads</CardTitle>
-              <CardDescription>Day by day for the selected period.</CardDescription>
-            </CardHeader>
-            <CardContent>
+          <KpiStrip kpis={overview.kpis} daily={overview.daily} />
+          <SalesSplit breakdown={overview.breakdown} />
+          <div className="grid gap-6 xl:grid-cols-3">
+            <Panel
+              className="xl:col-span-2"
+              title="Revenue and money left after ads"
+              description="Day by day for the selected period."
+            >
               <TrendChart data={overview.daily} />
-            </CardContent>
-          </Card>
-          <ChannelSplit channels={overview.byChannel} />
+            </Panel>
+            <Panel
+              title="By sales channel"
+              description="Ad spend counts against the channel the platform sells on."
+            >
+              <ChannelBars
+                data={overview.byChannel.map((c) => ({
+                  name: CHANNEL_NAME[c.channel] ?? c.channel,
+                  revenue: c.revenue.cents,
+                  profit: c.profit.cents,
+                }))}
+              />
+            </Panel>
+          </div>
+          <AttentionFeed items={attention} />
         </>
       )}
-    </div>
+    </>
   );
 }

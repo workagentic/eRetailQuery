@@ -9,7 +9,7 @@ import {
   loadOrderAgg,
   loadOrgTimezone,
 } from './aggregate';
-import { addDays } from './range';
+import { addDays, daysBetween } from './range';
 import type { ReportRange, SalesChannelName } from './types';
 
 export interface AdCampaignRow {
@@ -26,6 +26,8 @@ export interface AdCampaignRow {
   /** What to do about it. */
   action: string;
   estimatedDailyLossCents: number | null;
+  /** Break-even ROAS for the channel this ad sells on; null without cost data. */
+  breakEven: number | null;
 }
 
 export interface AdsReport {
@@ -47,6 +49,8 @@ export interface AdsReport {
     netAfterAdsCents: number | null;
   }[];
   campaigns: AdCampaignRow[];
+  /** One entry per day in the range (zero-filled): total spend and what the platforms claim they sold. */
+  daily: { date: string; spendCents: number; platformRevenueCents: number }[];
   /** True when there was no cost data to compute a break-even ROAS, so generic bands were used. */
   usedGenericBands: boolean;
   /** False when some sold units have no cost on record, so break-even ROAS is flattered. */
@@ -158,6 +162,7 @@ export async function getAds(
         : flag.explanation,
       action: actionFor(code, loss),
       estimatedDailyLossCents: loss,
+      breakEven: flag.breakEven,
     };
   });
   campaigns.sort((a, b) => RANK[a.flag] - RANK[b.flag] || b.spendCents - a.spendCents);
@@ -177,6 +182,21 @@ export async function getAds(
     };
   });
 
+  const totalsByDay = (
+    await tx.execute(sql`
+      select date::text as date, sum(spend_cents) as spend, sum(revenue_cents) as revenue
+      from ad_insights_daily
+      where date between ${p.range.from}::date and ${p.range.to}::date
+      group by date`)
+  ).rows as Record<string, unknown>[];
+  const totalsByDate = new Map(totalsByDay.map((d) => [String(d.date), d]));
+  const dayCount = daysBetween(p.range.from, p.range.to) + 1;
+  const daily = Array.from({ length: dayCount }, (_, i) => {
+    const date = addDays(p.range.from, i);
+    const d = totalsByDate.get(date);
+    return { date, spendCents: num(d?.spend), platformRevenueCents: num(d?.revenue) };
+  });
+
   const spendTotal = campaigns.reduce((a, c) => a + c.spendCents, 0);
   const revenueTotal = campaigns.reduce((a, c) => a + c.platformRevenueCents, 0);
   return {
@@ -189,6 +209,7 @@ export async function getAds(
     },
     byPlatform,
     campaigns,
+    daily,
     usedGenericBands: anyGeneric,
     costComplete: allOrders.costComplete,
   };
